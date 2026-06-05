@@ -381,6 +381,7 @@ class Database:
         confidence: float,
         evidence_check_passed: bool,
         needs_human_review: bool,
+        delivery_latency_seconds: Optional[int],
         sent_to: Optional[str],
         sent_at: Optional[datetime],
     ) -> int:
@@ -390,9 +391,9 @@ class Database:
                 INSERT INTO alerts(
                     mention_id, incident_group_id, risk_level, alert_reason, dedupe_key,
                     confidence, evidence_check_passed, needs_human_review,
-                    sent_to, sent_at, ack_status, created_at
+                    delivery_latency_seconds, sent_to, sent_at, ack_status, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
                 """,
                 (
                     mention_id,
@@ -403,6 +404,7 @@ class Database:
                     confidence,
                     int(evidence_check_passed),
                     int(needs_human_review),
+                    delivery_latency_seconds,
                     sent_to,
                     dt_to_str(sent_at),
                     dt_to_str(utcnow()),
@@ -614,6 +616,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     confidence REAL NOT NULL,
     evidence_check_passed INTEGER NOT NULL,
     needs_human_review INTEGER NOT NULL,
+    delivery_latency_seconds INTEGER,
     sent_to TEXT,
     sent_at TEXT,
     ack_status TEXT NOT NULL DEFAULT 'pending',

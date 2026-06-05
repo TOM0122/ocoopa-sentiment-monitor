@@ -13,11 +13,13 @@ class AnalysisService:
         self,
         rule_engine: Optional[RiskRuleEngine] = None,
         provider: Optional[LLMProvider] = None,
+        fallback_provider: Optional[LLMProvider] = None,
         validator: Optional[SchemaValidator] = None,
         evidence_checker: Optional[EvidenceChecker] = None,
     ):
         self.rule_engine = rule_engine or RiskRuleEngine()
         self.provider = provider or RuleOnlyProvider()
+        self.fallback_provider = fallback_provider or RuleOnlyProvider()
         self.validator = validator or SchemaValidator()
         self.evidence_checker = evidence_checker or EvidenceChecker()
 
@@ -25,7 +27,14 @@ class AnalysisService:
         if mention.id is None:
             raise ValueError("mention.id is required before analysis")
         rule_decision = self.rule_engine.evaluate(mention.title, mention.raw_text, mention.matched_keywords)
-        payload = self.validator.validate(self.provider.analyze(mention, rule_decision))
+        try:
+            payload = self.validator.validate(self.provider.analyze(mention, rule_decision))
+            provider = self.provider
+            fallback_note = ""
+        except Exception:
+            payload = self.validator.validate(self.fallback_provider.analyze(mention, rule_decision))
+            provider = self.fallback_provider
+            fallback_note = "llm_provider_failed_fallback_rule_only; "
         evidence = self.evidence_checker.check(
             raw_text=mention.raw_text,
             source_url=mention.source_url,
@@ -40,8 +49,8 @@ class AnalysisService:
             needs_human_review = True
         return AnalysisResult(
             mention_id=mention.id,
-            model_provider=self.provider.provider_name,
-            model_name=self.provider.model_name,
+            model_provider=provider.provider_name,
+            model_name=provider.model_name,
             prompt_version="m1-rule-first-v1",
             sentiment=str(payload["sentiment"]),
             risk_level=str(payload["risk_level"]),
@@ -53,7 +62,7 @@ class AnalysisService:
             escalation_reason=str(payload["escalation_reason"]),
             confidence=float(payload["confidence"]),
             evidence_check_passed=evidence.passed,
-            evidence_check_notes=evidence.notes,
+            evidence_check_notes=fallback_note + evidence.notes,
             needs_human_review=needs_human_review,
             analysis_created_at=utcnow(),
         )

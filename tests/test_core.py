@@ -3,13 +3,17 @@ from __future__ import annotations
 import tempfile
 import unittest
 from datetime import timedelta
+from unittest.mock import patch
 
 from ocoopa_monitor.analysis import AnalysisService
 from ocoopa_monitor.config import Settings
 from ocoopa_monitor.db import Database, dt_to_str
+from ocoopa_monitor.delivery import DeliveryClient, DingTalkRobotChannel
 from ocoopa_monitor.evidence import EvidenceChecker
 from ocoopa_monitor.fetchers.base import Fetcher
+from ocoopa_monitor.fetchers.search_api import SerpAPIFetcher
 from ocoopa_monitor.keywords import DEFAULT_KEYWORDS
+from ocoopa_monitor.llm import DeepSeekProvider
 from ocoopa_monitor.models import RawItem, SourceConfig, utcnow
 from ocoopa_monitor.pipeline import MonitorPipeline
 from ocoopa_monitor.risk import RiskRuleEngine
@@ -27,15 +31,25 @@ class StaticFetcher(Fetcher):
 
 
 def settings(db_path):
-    return Settings(
-        db_path=db_path,
-        alert_webhook_url="",
-        high_lane_interval_minutes=15,
-        regular_lane_interval_minutes=60,
-        p0_health_threshold_minutes=120,
-        backfill_days=60,
-        request_timeout_seconds=1,
-    )
+        return Settings(
+            db_path=db_path,
+            alert_channel="generic",
+            alert_webhook_url="",
+            alert_webhook_secret="",
+            alert_at_mobiles="",
+            alert_rate_limit_per_minute=20,
+            llm_provider="rule",
+            llm_model="deepseek-v4-flash",
+            llm_api_key="",
+            llm_base_url="https://api.deepseek.com",
+            serpapi_api_key="",
+            gnews_api_key="",
+            high_lane_interval_minutes=15,
+            regular_lane_interval_minutes=60,
+            p0_health_threshold_minutes=120,
+            backfill_days=180,
+            request_timeout_seconds=1,
+        )
 
 
 class CoreTests(unittest.TestCase):
@@ -104,6 +118,7 @@ class CoreTests(unittest.TestCase):
         with db.connect() as conn:
             alert = conn.execute("SELECT * FROM alerts").fetchone()
         self.assertEqual(alert["risk_level"], "red")
+        self.assertIsNotNone(alert["delivery_latency_seconds"])
 
     def test_evidence_checker_drops_ungrounded_quote(self):
         result = EvidenceChecker().check(
@@ -118,6 +133,32 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertEqual(result.valid_quotes, [])
         self.assertTrue(result.needs_human_review)
+
+    def test_evidence_checker_flags_ungrounded_chinese_entity(self):
+        result = EvidenceChecker().check(
+            raw_text="Ocoopa recall mentioned by CPSC in source text after a fire report.",
+            source_url="https://example.com",
+            summary_zh="Ocoopa 暖手宝被加州法院召回。",
+            escalation_reason="召回",
+            key_quotes=["Ocoopa recall mentioned by CPSC"],
+            confidence=0.91,
+            risk_level="red",
+        )
+        self.assertFalse(result.passed)
+        self.assertIn("summary_not_grounded", result.notes)
+        self.assertTrue(result.needs_human_review)
+
+    def test_evidence_checker_accepts_chinese_risk_terms_grounded_by_english_raw(self):
+        result = EvidenceChecker().check(
+            raw_text="Ocoopa wrongful death lawsuit after a hand warmer fire.",
+            source_url="https://example.com",
+            summary_zh="Ocoopa 涉及过失致死诉讼和起火风险。",
+            escalation_reason="过失致死; 诉讼; 起火",
+            key_quotes=["Ocoopa wrongful death lawsuit"],
+            confidence=0.91,
+            risk_level="red",
+        )
+        self.assertTrue(result.passed)
 
     def test_negated_recall_is_not_red(self):
         decision = RiskRuleEngine().evaluate(
@@ -165,6 +206,106 @@ class CoreTests(unittest.TestCase):
         result = pipeline.run_lane("high")
         self.assertEqual(result["sources_failed"], 1)
         self.assertEqual(result["mentions_processed"], 1)
+
+    def test_deepseek_provider_parses_schema_json(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return (
+                    b'{"choices":[{"message":{"content":"{\\"sentiment\\":\\"negative\\",'
+                    b'\\"risk_level\\":\\"red\\",\\"category\\":\\"lawsuit\\",'
+                    b'\\"summary_zh\\":\\"Ocoopa lawsuit\\",'
+                    b'\\"key_quotes\\":[\\"Ocoopa lawsuit\\"],'
+                    b'\\"requires_escalation\\":true,'
+                    b'\\"escalation_reason\\":\\"lawsuit\\",\\"confidence\\":0.9}"}}]}'
+                )
+
+        mention = RawItem(
+            source_type="news",
+            source_name="unit",
+            source_url="https://example.com",
+            title="Ocoopa lawsuit",
+            raw_text="Ocoopa lawsuit",
+        )
+        db, tmp = self.make_db()
+        pipeline = MonitorPipeline(db, settings(tmp.name), fetchers={"static": StaticFetcher([mention])})
+        stored = pipeline._build_mention(mention, ["Ocoopa lawsuit"], backfill=False)
+        stored.id = 1
+        decision = RiskRuleEngine().evaluate(stored.title, stored.raw_text, stored.matched_keywords)
+        with patch("ocoopa_monitor.llm.urlopen", return_value=FakeResponse()):
+            payload = DeepSeekProvider(api_key="secret").analyze(stored, decision)
+        self.assertEqual(payload["risk_level"], "red")
+
+    def test_dingtalk_channel_builds_signed_markdown_request(self):
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"errcode":0,"errmsg":"ok"}'
+
+        def fake_urlopen(request, timeout=10):
+            captured["url"] = request.full_url
+            captured["body"] = request.data.decode("utf-8")
+            return FakeResponse()
+
+        channel = DingTalkRobotChannel(
+            webhook_url="https://oapi.dingtalk.com/robot/send?access_token=abc",
+            secret="ding-secret",
+            at_mobiles=["13800000000"],
+            rate_limit_per_minute=20,
+        )
+        payload = DeliveryClient(channel).alert_payload(
+            title="Ocoopa fire lawsuit",
+            url="https://example.com",
+            risk_level="red",
+            reason="lawsuit",
+            confidence=0.9,
+            evidence_check_passed=True,
+            needs_human_review=False,
+            sent_at=utcnow(),
+            delivery_latency_seconds=42,
+        )
+        with patch("ocoopa_monitor.delivery.urlopen", side_effect=fake_urlopen):
+            sent_to = DeliveryClient(channel).send_alert(payload)
+        self.assertEqual(sent_to, "https://oapi.dingtalk.com/robot/send?access_token=abc")
+        self.assertIn("timestamp=", captured["url"])
+        self.assertIn("sign=", captured["url"])
+        self.assertIn('"msgtype": "markdown"', captured["body"])
+        self.assertIn("13800000000", captured["body"])
+
+    def test_serpapi_uses_single_high_sensitivity_boolean_query(self):
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"organic_results":[{"title":"Ocoopa lawsuit","link":"https://example.com","snippet":"fire"}]}'
+
+        def fake_urlopen(request, timeout=20):
+            captured["url"] = request.full_url
+            return FakeResponse()
+
+        source = SourceConfig("serpapi_high_search", "search", "P0", "high", "serpapi", "https://serpapi.com")
+        with patch("ocoopa_monitor.fetchers.search_api.urlopen", side_effect=fake_urlopen):
+            items = SerpAPIFetcher(api_key="secret").fetch(source, ["Ocoopa lawsuit"])
+        self.assertEqual(len(items), 1)
+        self.assertIn("Ocoopa+%28fire+OR+death+OR+lawsuit+OR+recall+OR+CPSC+OR+%22class+action%22%29", captured["url"])
 
 
 if __name__ == "__main__":
