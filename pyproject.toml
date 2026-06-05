@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocoopa-monitor"
+version = "0.1.0"
+description = "Ocoopa public-opinion and PR risk monitoring agent"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+api = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
+postgres = ["psycopg[binary]>=3.2"]
+
+[project.scripts]
+ocoopa-monitor = "ocoopa_monitor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
