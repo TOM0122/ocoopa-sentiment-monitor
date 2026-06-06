@@ -7,7 +7,8 @@ from .analysis import AnalysisService
 from .config import Settings
 from .db import Database
 from .delivery import DeliveryClient
-from .fetchers import CPSCRecallFetcher, Fetcher, GoogleNewsRSSFetcher
+from .fetchers import CPSCRecallFetcher, Fetcher, GenericRSSFetcher, GNewsFetcher, GoogleNewsRSSFetcher, SerpAPIFetcher
+from .llm import RuleOnlyProvider, provider_from_settings
 from .models import Mention, RawItem, SourceConfig, utcnow
 from .normalize import canonicalize_url, content_hash, event_fingerprint, excerpt, find_keywords, normalize_text
 
@@ -23,11 +24,14 @@ class MonitorPipeline:
     ):
         self.db = db
         self.settings = settings
-        self.analysis_service = analysis_service or AnalysisService()
-        self.delivery_client = delivery_client or DeliveryClient(settings.alert_webhook_url)
+        self.analysis_service = analysis_service or self._analysis_service_from_settings(settings)
+        self.delivery_client = delivery_client or DeliveryClient.from_settings(settings)
         self.fetchers = fetchers or {
             "rss": GoogleNewsRSSFetcher(settings.request_timeout_seconds),
             "api": CPSCRecallFetcher(settings.request_timeout_seconds),
+            "generic_rss": GenericRSSFetcher(settings.request_timeout_seconds),
+            "serpapi": SerpAPIFetcher(settings.serpapi_api_key, settings.request_timeout_seconds),
+            "gnews": GNewsFetcher(settings.gnews_api_key, settings.request_timeout_seconds),
         }
 
     def run_lane(
@@ -57,7 +61,7 @@ class MonitorPipeline:
                 stats["items_fetched"] += len(raw_items)
                 for raw_item in raw_items:
                     query_terms = list(keyword_terms)
-                    if raw_item.source_name.startswith("google_news"):
+                    if raw_item.source_name.startswith(("google_news", "serpapi", "gnews")):
                         query_terms.extend(self._source_query_terms(raw_item))
                     mention = self._build_mention(raw_item, query_terms, backfill=backfill)
                     if since and mention.published_at and mention.published_at < since:
@@ -84,6 +88,14 @@ class MonitorPipeline:
         if source.method not in self.fetchers:
             raise ValueError(f"No fetcher configured for method={source.method}")
         return self.fetchers[source.method]
+
+    @staticmethod
+    def _analysis_service_from_settings(settings: Settings) -> AnalysisService:
+        try:
+            provider = provider_from_settings(settings)
+        except Exception:
+            provider = RuleOnlyProvider()
+        return AnalysisService(provider=provider, fallback_provider=RuleOnlyProvider())
 
     def _build_mention(self, raw_item: RawItem, keyword_terms: Iterable[str], backfill: bool) -> Mention:
         now = utcnow()
@@ -128,7 +140,12 @@ class MonitorPipeline:
     def _should_alert(mention: Mention, analysis, backfill: bool) -> bool:
         if backfill or mention.backfill:
             return False
-        return analysis.risk_level == "red" and analysis.requires_escalation
+        return (
+            analysis.risk_level == "red"
+            and analysis.requires_escalation
+            and analysis.evidence_check_passed
+            and not analysis.needs_human_review
+        )
 
     def _create_alert(self, mention: Mention, analysis, incident_group_id: int) -> bool:
         if mention.id is None:
@@ -137,6 +154,7 @@ class MonitorPipeline:
         if self.db.alert_exists(dedupe_key):
             return False
         sent_at = utcnow()
+        delivery_latency_seconds = self._delivery_latency_seconds(mention, sent_at)
         payload = self.delivery_client.alert_payload(
             title=mention.title,
             url=mention.source_url,
@@ -146,6 +164,7 @@ class MonitorPipeline:
             evidence_check_passed=analysis.evidence_check_passed,
             needs_human_review=analysis.needs_human_review,
             sent_at=sent_at,
+            delivery_latency_seconds=delivery_latency_seconds,
         )
         sent_to = self.delivery_client.send_alert(payload)
         self.db.insert_alert(
@@ -157,10 +176,20 @@ class MonitorPipeline:
             confidence=analysis.confidence,
             evidence_check_passed=analysis.evidence_check_passed,
             needs_human_review=analysis.needs_human_review,
+            delivery_latency_seconds=delivery_latency_seconds,
             sent_to=sent_to,
             sent_at=sent_at,
         )
         return True
+
+    @staticmethod
+    def _delivery_latency_seconds(mention: Mention, sent_at: datetime) -> Optional[int]:
+        start = mention.published_at or mention.first_seen_at
+        if not start:
+            return None
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        return max(0, int((sent_at - start.astimezone(timezone.utc)).total_seconds()))
 
 
 def _aware(value: Optional[datetime]) -> Optional[datetime]:

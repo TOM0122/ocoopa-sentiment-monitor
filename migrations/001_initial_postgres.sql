@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     confidence NUMERIC NOT NULL,
     evidence_check_passed BOOLEAN NOT NULL,
     needs_human_review BOOLEAN NOT NULL,
+    delivery_latency_seconds INTEGER,
     sent_to TEXT,
     sent_at TIMESTAMPTZ,
     ack_status TEXT NOT NULL DEFAULT 'pending',
