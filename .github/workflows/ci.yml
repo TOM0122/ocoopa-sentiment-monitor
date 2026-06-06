@@ -9,20 +9,35 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ocoopa_monitor_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ocoopa_monitor_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     strategy:
       matrix:
         python-version: ["3.9", "3.12"]
+    env:
+      OCOOPA_TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/ocoopa_monitor_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package
-        run: python -m pip install -e .
+        run: python -m pip install -e ".[postgres]"
       - name: Run unit tests
         run: PYTHONPATH="$PWD/src" python -m unittest discover -s tests
       - name: Compile sources
         run: python -m compileall src tests
       - name: Run non-production doctor
         run: PYTHONPATH="$PWD/src" python -m ocoopa_monitor.cli doctor --json
-
