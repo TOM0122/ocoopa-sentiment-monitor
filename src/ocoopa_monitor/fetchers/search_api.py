@@ -12,8 +12,8 @@ from .base import Fetcher
 
 HIGH_SENSITIVITY_QUERY = 'Ocoopa (fire OR death OR lawsuit OR recall OR CPSC OR "class action")'
 REGULAR_QUERY = (
-    '("Ocoopa" OR "Ocopa" OR "rechargeable hand warmer") '
-    '(fire OR death OR lawsuit OR recall OR burn OR overheat)'
+    '(("Ocoopa" OR "Ocopa") (fire OR death OR lawsuit OR recall OR burn OR overheat)) '
+    'OR ("hand warmer" (fire OR death OR recall OR lawsuit))'
 )
 
 
@@ -149,7 +149,7 @@ class BraveSearchFetcher(Fetcher):
                 "country": "us",
                 "search_lang": "en",
                 "safesearch": "moderate",
-                "freshness": "pm" if source.lane == "high" else "py",
+                "freshness": "pd" if source.lane == "high" else "py",
             }
         )
         request = Request(
