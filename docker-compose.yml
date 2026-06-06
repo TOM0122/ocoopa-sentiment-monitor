@@ -1,0 +1,13 @@
+services:
+  ocoopa-monitor:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ocoopa-data:/data
+    command: ["python", "-m", "ocoopa_monitor.cli", "scheduler"]
+
+volumes:
+  ocoopa-data:
+

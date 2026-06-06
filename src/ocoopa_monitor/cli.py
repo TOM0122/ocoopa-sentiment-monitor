@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Any, Dict
 
 from .config import load_settings
 from .db import Database
+from .doctor import run_doctor
 from .keywords import DEFAULT_KEYWORDS
 from .pipeline import MonitorPipeline
 from .reports import DailyReportService
@@ -28,6 +30,9 @@ def main() -> None:
     health.add_argument("--json", action="store_true")
     scheduler = sub.add_parser("scheduler")
     scheduler.add_argument("--poll-seconds", type=int, default=30)
+    doctor = sub.add_parser("doctor")
+    doctor.add_argument("--production", action="store_true")
+    doctor.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
     settings = load_settings()
@@ -82,6 +87,26 @@ def main() -> None:
         db.seed_keywords(DEFAULT_KEYWORDS)
         db.seed_sources(DEFAULT_SOURCES)
         SimpleScheduler(db, settings).run_forever(args.poll_seconds)
+        return
+    if args.command == "doctor":
+        report = run_doctor(settings, production=args.production)
+        payload = {
+            "ok": report.ok,
+            "errors": report.errors,
+            "warnings": report.warnings,
+            "settings_summary": report.settings_summary,
+        }
+        if args.json:
+            print_json(payload)
+        else:
+            print(f"ok={report.ok}")
+            for error in report.errors:
+                print(f"ERROR: {error}")
+            for warning in report.warnings:
+                print(f"WARNING: {warning}")
+            print_json({"settings_summary": report.settings_summary})
+        if not report.ok:
+            sys.exit(1)
 
 
 def print_json(payload: Dict[str, Any]) -> None:

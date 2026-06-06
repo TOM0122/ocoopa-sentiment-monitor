@@ -45,6 +45,14 @@ python3 -m ocoopa_monitor.cli scheduler
 
 It runs the high-sensitivity lane every 15 minutes by default, the regular lane hourly, and generates a Beijing-time daily report around 09:00.
 
+Validate deployment configuration before starting production:
+
+```bash
+python3 -m ocoopa_monitor.cli doctor --production
+```
+
+The doctor command reports whether required secrets are configured without printing secret values.
+
 ## Backfill
 
 Backfill seeds the historical baseline and never sends real-time red alerts:
@@ -105,6 +113,33 @@ The high-sensitivity lane uses a single Boolean query per commercial source to c
 ```text
 Ocoopa (fire OR death OR lawsuit OR recall OR CPSC OR "class action")
 ```
+
+## Docker Deployment
+
+Create a `.env` file from `.env.example`, then run:
+
+```bash
+docker compose up -d --build
+docker compose exec ocoopa-monitor python -m ocoopa_monitor.cli doctor --production
+docker compose exec ocoopa-monitor python -m ocoopa_monitor.cli seed
+docker compose exec ocoopa-monitor python -m ocoopa_monitor.cli backfill --days 180
+```
+
+The container stores the SQLite database in the `ocoopa-data` Docker volume at `/data/ocoopa_monitor.db`.
+
+## Human Setup Checklist
+
+Before production cutover, a human operator must provide:
+
+- DingTalk custom robot webhook URL.
+- DingTalk robot signing secret.
+- Mobile numbers to @ for red alerts.
+- DeepSeek API key with access to the configured model.
+- SerpAPI API key.
+- GNews API key.
+- Deployment host or container runtime.
+
+Do not commit `.env`, API keys, webhook secrets, or production database files.
 
 ## Current Source Defaults
 

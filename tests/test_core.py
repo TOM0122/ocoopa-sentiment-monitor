@@ -9,6 +9,7 @@ from ocoopa_monitor.analysis import AnalysisService
 from ocoopa_monitor.config import Settings
 from ocoopa_monitor.db import Database, dt_to_str
 from ocoopa_monitor.delivery import DeliveryClient, DingTalkRobotChannel
+from ocoopa_monitor.doctor import run_doctor
 from ocoopa_monitor.evidence import EvidenceChecker
 from ocoopa_monitor.fetchers.base import Fetcher
 from ocoopa_monitor.fetchers.search_api import SerpAPIFetcher
@@ -306,6 +307,38 @@ class CoreTests(unittest.TestCase):
             items = SerpAPIFetcher(api_key="secret").fetch(source, ["Ocoopa lawsuit"])
         self.assertEqual(len(items), 1)
         self.assertIn("Ocoopa+%28fire+OR+death+OR+lawsuit+OR+recall+OR+CPSC+OR+%22class+action%22%29", captured["url"])
+
+    def test_production_doctor_requires_deepseek_and_dingtalk_secrets(self):
+        report = run_doctor(settings("/tmp/test.db"), production=True)
+        self.assertFalse(report.ok)
+        self.assertTrue(any("OCOOPA_LLM_PROVIDER=deepseek" in error for error in report.errors))
+        self.assertTrue(any("OCOOPA_ALERT_CHANNEL=dingtalk" in error for error in report.errors))
+        self.assertFalse(report.settings_summary["llm_api_key_configured"])
+
+    def test_production_doctor_passes_with_required_secret_flags(self):
+        base = settings("/tmp/test.db")
+        prod_settings = type(base)(
+            db_path=base.db_path,
+            alert_channel="dingtalk",
+            alert_webhook_url="https://oapi.dingtalk.com/robot/send?access_token=xxx",
+            alert_webhook_secret="secret",
+            alert_at_mobiles="13800000000",
+            alert_rate_limit_per_minute=20,
+            llm_provider="deepseek",
+            llm_model="deepseek-v4-flash",
+            llm_api_key="key",
+            llm_base_url="https://api.deepseek.com",
+            serpapi_api_key="serp",
+            gnews_api_key="gnews",
+            high_lane_interval_minutes=base.high_lane_interval_minutes,
+            regular_lane_interval_minutes=base.regular_lane_interval_minutes,
+            p0_health_threshold_minutes=base.p0_health_threshold_minutes,
+            backfill_days=180,
+            request_timeout_seconds=base.request_timeout_seconds,
+        )
+        report = run_doctor(prod_settings, production=True)
+        self.assertTrue(report.ok)
+        self.assertEqual(report.errors, [])
 
 
 if __name__ == "__main__":
