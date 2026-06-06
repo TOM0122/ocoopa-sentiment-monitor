@@ -33,6 +33,18 @@ DEFAULT_SOURCES: List[SourceConfig] = [
         url="http://www.saferproducts.gov/RestWebServices/Recall?format=json",
         alert_threshold_minutes=120,
     ),
+    # Legal lead-gen / class-action aggregator (public RSS, robots-allowed,
+    # Crawl-delay 10s). Earliest signal of class-action recruitment. Keyword
+    # filtering keeps only Ocoopa / hand-warmer items, so volume stays low.
+    SourceConfig(
+        source_name="aboutlawsuits_rss",
+        source_type="legal",
+        priority="P0",
+        lane="high",
+        method="generic_rss",
+        url="https://www.aboutlawsuits.com/feed/",
+        alert_threshold_minutes=180,
+    ),
     # --- REGULAR lane (hourly): commercial APIs throttled into free quotas ---
     SourceConfig(
         source_name="brave_regular_search",
