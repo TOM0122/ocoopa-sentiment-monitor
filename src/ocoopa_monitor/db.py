@@ -44,6 +44,21 @@ class Database:
     def init(self) -> None:
         with self.connect() as conn:
             conn.executescript(SQLITE_SCHEMA)
+            self._migrate_sqlite(conn)
+
+    def _migrate_sqlite(self, conn: sqlite3.Connection) -> None:
+        self._add_column_if_missing(conn, "alerts", "delivery_latency_seconds", "INTEGER")
+
+    @staticmethod
+    def _add_column_if_missing(
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        column_type: str,
+    ) -> None:
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
     def seed_keywords(self, keywords: Iterable[Keyword]) -> None:
         now = dt_to_str(utcnow())

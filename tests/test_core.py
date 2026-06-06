@@ -340,6 +340,35 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(report.ok)
         self.assertEqual(report.errors, [])
 
+    def test_init_migrates_existing_sqlite_alert_schema(self):
+        tmp = tempfile.NamedTemporaryFile(delete=True)
+        db = Database(tmp.name)
+        with db.connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mention_id INTEGER NOT NULL,
+                    incident_group_id INTEGER,
+                    risk_level TEXT NOT NULL,
+                    alert_reason TEXT NOT NULL,
+                    dedupe_key TEXT NOT NULL UNIQUE,
+                    confidence REAL NOT NULL,
+                    evidence_check_passed INTEGER NOT NULL,
+                    needs_human_review INTEGER NOT NULL,
+                    sent_to TEXT,
+                    sent_at TEXT,
+                    ack_status TEXT NOT NULL DEFAULT 'pending',
+                    muted_until TEXT,
+                    created_at TEXT NOT NULL
+                );
+                """
+            )
+        db.init()
+        with db.connect() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(alerts)").fetchall()}
+        self.assertIn("delivery_latency_seconds", columns)
+
 
 if __name__ == "__main__":
     unittest.main()
