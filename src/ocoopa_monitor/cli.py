@@ -43,6 +43,11 @@ def main() -> None:
     review.add_argument("status", nargs="?", choices=["confirmed", "false_positive", "muted"])
     review.add_argument("--days", type=int, default=None, help="mute duration in days (muted only; omit = indefinite)")
     review.add_argument("--limit", type=int, default=20)
+    keyword = sub.add_parser("keyword")
+    keyword.add_argument("action", choices=["list", "add", "enable", "disable"])
+    keyword.add_argument("term", nargs="?")
+    keyword.add_argument("--category", default="custom")
+    keyword.add_argument("--lane", choices=["high", "regular"], default="high")
 
     args = parser.parse_args()
     settings = load_settings()
@@ -143,6 +148,25 @@ def main() -> None:
                 "updated": updated,
             }
         )
+        return
+    if args.command == "keyword":
+        db.init()
+        if args.action == "list":
+            for kw in db.list_keywords_all():
+                print(f"[{'on ' if kw.active else 'off'}] {kw.lane:<7} {kw.category:<10} {kw.term}")
+            return
+        if not args.term:
+            print("usage: keyword <add|enable|disable> <term> [--category C] [--lane high|regular]")
+            sys.exit(1)
+        if args.action == "add":
+            db.upsert_keyword(args.term, args.category, args.lane, True)
+            print_json({"added": args.term, "category": args.category, "lane": args.lane})
+            return
+        updated = db.set_keyword_active(args.term, args.action == "enable")
+        if not updated:
+            print(f"keyword not found: {args.term}")
+            sys.exit(1)
+        print_json({"term": args.term, "active": args.action == "enable"})
         return
     if args.command == "doctor":
         report = run_doctor(settings, production=args.production)

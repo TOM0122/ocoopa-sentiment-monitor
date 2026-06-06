@@ -67,7 +67,9 @@ class DingTalkRobotChannel(DeliveryChannel):
                 "text": text,
             },
             "at": {
-                "atMobiles": [] if payload.get("needs_human_review") else self.at_mobiles,
+                "atMobiles": []
+                if (payload.get("needs_human_review") or payload.get("suppress_at"))
+                else self.at_mobiles,
                 "isAtAll": False,
             },
         }
@@ -127,6 +129,14 @@ class DeliveryClient:
 
     def send_alert(self, payload: Dict[str, object]) -> Optional[str]:
         return self.channel.send_alert(payload)
+
+    def send_text(self, title: str, text: str, suppress_at: bool = True) -> Optional[str]:
+        """Send a non-alert message (daily report, source-health notice).
+
+        suppress_at=True (default) avoids @-ing the on-call for routine pushes
+        like the daily report; set False for urgent notices (e.g. P0 source down).
+        """
+        return self.channel.send_alert({"title": title, "text": text, "suppress_at": suppress_at})
 
     def alert_payload(
         self,

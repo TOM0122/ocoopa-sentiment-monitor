@@ -52,7 +52,8 @@ scheduler 启动时:若数据库未 bootstrap → 自动跑 180 天静默 backfi
 - **高敏车道**每 15 分钟:Google News RSS + CPSC(免费、扛时效)。
 - **常规车道**每小时:Brave / GNews / Google News RSS / PRNewswire。
 - **红色高危** → 实时推送钉钉群;`needs_human_review`(低置信/证据未完全校验)的红色仍推送,但文案标注「需人工核实」且不 @ 手机号。
-- **每日 09:00(北京时间)** 生成并推送中文日报。
+- **每日 09:00(北京时间)** 生成并**推送**中文日报到钉钉(routine 推送,不 @ 手机号)。
+- **源健康告警**:scheduler 每 30 分钟检查抓取源;**P0 源**(Google News RSS / CPSC / AboutLawsuits)失联或连续失败时推钉钉并 @ 负责人(P1 商业 API 配额失败属预期,不告警)。同一源失败只告警一次,恢复后再失败会重新告警。
 
 ### 配额策略(免费档)
 
@@ -71,7 +72,13 @@ python -m ocoopa_monitor.cli review list                  # 列出近期告警(�
 python -m ocoopa_monitor.cli review mark <id> confirmed       # 标记已确认(继续告警)
 python -m ocoopa_monitor.cli review mark <id> false_positive  # 标记误报(该事件永久不再实时告警)
 python -m ocoopa_monitor.cli review mark <id> muted --days 7  # 静音 7 天(到期自动恢复;省略 --days = 无限期)
+python -m ocoopa_monitor.cli keyword list                     # 列出全部监控词(含停用)
+python -m ocoopa_monitor.cli keyword add "<词>" --category legal --lane high  # 新增监控词(下次抓取即生效)
+python -m ocoopa_monitor.cli keyword disable "<词>"           # 停用某词
+python -m ocoopa_monitor.cli keyword enable "<词>"            # 重新启用
 ```
+
+> **关键词热更新**:诉讼公开后冒出的律所名、案号、新型号,用 `keyword add` 加入即可,无需改代码或重部署,下一次车道抓取自动生效。
 
 > **人工反馈闭环(M2)**:`review mark` 作用于「事件」(同一 event_fingerprint),不是单条消息。标记 `false_positive`/`muted` 后,该事件的后续实时告警会被抑制(仍进历史库与日报);`confirmed` 不抑制、仅留痕。被抑制的告警在 run-lane 统计里计入 `alerts_suppressed_muted`。
 

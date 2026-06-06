@@ -17,7 +17,9 @@ from ocoopa_monitor.keywords import DEFAULT_KEYWORDS
 from ocoopa_monitor.llm import DeepSeekProvider
 from ocoopa_monitor.models import AnalysisResult, RawItem, SourceConfig, utcnow
 from ocoopa_monitor.pipeline import MonitorPipeline
+from ocoopa_monitor.reports import DailyReportService
 from ocoopa_monitor.risk import RiskRuleEngine
+from ocoopa_monitor.scheduler import SimpleScheduler
 from ocoopa_monitor.sources import DEFAULT_SOURCES
 
 
@@ -682,6 +684,62 @@ class CoreTests(unittest.TestCase):
     def test_review_incident_unknown_fingerprint_returns_false(self):
         db, _ = self.make_db()
         self.assertFalse(db.review_incident("nonexistent-fp", "muted", None))
+
+    def test_daily_report_delivers_to_channel(self):
+        db, tmp = self.make_db()
+        captured = []
+
+        class FakeDelivery:
+            def send_text(self, title, text, suppress_at=True):
+                captured.append((title, suppress_at))
+                return "dingtalk"
+
+        rep = DailyReportService(db, FakeDelivery()).generate("Asia/Shanghai")
+        self.assertEqual(rep["delivery_status"], "delivered")
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(captured[0][1])  # suppress_at: routine push, no @
+        # No client -> stays stored.
+        self.assertEqual(DailyReportService(db).generate("Asia/Shanghai")["delivery_status"], "stored")
+
+    def test_scheduler_pages_p0_unhealthy_once_and_excludes_p1(self):
+        db, tmp = self.make_db()
+        db.seed_sources(
+            [
+                SourceConfig("p0_news", "news", "P0", "high", "static", "x://p0", alert_threshold_minutes=120),
+                SourceConfig("p1_brave", "search", "P1", "regular", "brave_search", "x://p1", alert_threshold_minutes=360),
+            ]
+        )
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE source_health SET last_success_at=?, health_status='failing', consecutive_failures=3",
+                (dt_to_str(utcnow() - timedelta(hours=5)),),
+            )
+        captured = []
+
+        class FakeDelivery:
+            def send_text(self, title, text, suppress_at=True):
+                captured.append(text)
+                return "x"
+
+        sch = SimpleScheduler(db, settings(tmp.name))
+        sch.delivery = FakeDelivery()
+        now = utcnow()
+        sch._maybe_health_check(now)
+        self.assertEqual(len(captured), 1)
+        self.assertIn("p0_news", captured[0])
+        self.assertNotIn("p1_brave", captured[0])  # P1 quota failures are not paged
+        # Re-check: already alerted -> no duplicate page.
+        sch._maybe_health_check(now + timedelta(minutes=31))
+        self.assertEqual(len(captured), 1)
+
+    def test_keyword_cli_db_add_disable_and_hot_filter(self):
+        db, _ = self.make_db()
+        db.upsert_keyword("Ocoopa HR-12X fire", "model", "high")
+        self.assertIn("Ocoopa HR-12X fire", {k.term for k in db.get_keywords("high")})
+        self.assertTrue(db.set_keyword_active("Ocoopa HR-12X fire", False))
+        self.assertNotIn("Ocoopa HR-12X fire", {k.term for k in db.get_keywords("high")})
+        self.assertIn("Ocoopa HR-12X fire", {k.term for k in db.list_keywords_all()})
+        self.assertFalse(db.set_keyword_active("does-not-exist", True))
 
 
 if __name__ == "__main__":
