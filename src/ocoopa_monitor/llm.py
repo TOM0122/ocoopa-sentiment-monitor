@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import time
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .models import Mention
 from .risk import RuleDecision
+
+MAX_LLM_RAW_TEXT_CHARS = 12000
 
 
 class LLMProvider(ABC):
@@ -87,6 +91,9 @@ class DeepSeekProvider(LLMProvider):
         self.timeout_seconds = timeout_seconds
 
     def analyze(self, mention: Mention, rule_decision: RuleDecision) -> Dict[str, object]:
+        raw_text = mention.raw_text
+        if len(raw_text) > MAX_LLM_RAW_TEXT_CHARS:
+            raw_text = raw_text[:MAX_LLM_RAW_TEXT_CHARS] + "\n[TRUNCATED]"
         payload = {
             "model": self.model_name,
             "temperature": 0,
@@ -144,7 +151,7 @@ class DeepSeekProvider(LLMProvider):
                                 if mention.published_at
                                 else None,
                                 "matched_keywords": mention.matched_keywords,
-                                "raw_text": mention.raw_text,
+                                "raw_text": raw_text,
                             },
                         },
                         ensure_ascii=False,
@@ -161,14 +168,45 @@ class DeepSeekProvider(LLMProvider):
             },
             method="POST",
         )
-        with urlopen(request, timeout=self.timeout_seconds) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        data = self._send_request(request)
         content = data["choices"][0]["message"]["content"]
         if isinstance(content, str):
             return json.loads(content)
         if isinstance(content, dict):
             return content
         raise ValueError("DeepSeek response content is not JSON")
+
+    def _send_request(self, request: Request) -> Dict[str, object]:
+        last_error: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                with urlopen(request, timeout=self.timeout_seconds) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                last_error = exc
+                if exc.code not in {429, 500, 502, 503, 504} or attempt == 2:
+                    raise
+                self._sleep_before_retry(exc, attempt)
+            except URLError as exc:
+                last_error = exc
+                if attempt == 2:
+                    raise
+                self._sleep_before_retry(None, attempt)
+        if last_error:
+            raise last_error
+        raise RuntimeError("DeepSeek request failed without an exception")
+
+    @staticmethod
+    def _sleep_before_retry(error: Optional[HTTPError], attempt: int) -> None:
+        retry_after = error.headers.get("Retry-After") if error is not None else None
+        if retry_after:
+            try:
+                delay = min(float(retry_after), 5.0)
+            except ValueError:
+                delay = min(2**attempt, 5.0)
+        else:
+            delay = min(2**attempt, 5.0)
+        time.sleep(delay)
 
 
 class SchemaValidator:
