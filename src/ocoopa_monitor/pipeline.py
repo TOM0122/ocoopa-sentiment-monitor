@@ -70,7 +70,7 @@ class MonitorPipeline:
                 stats["items_fetched"] += len(raw_items)
                 for raw_item in raw_items:
                     query_terms = list(keyword_terms)
-                    if raw_item.source_name.startswith(("google_news", "serpapi", "gnews")):
+                    if raw_item.source_name.startswith(("google_news", "serpapi", "gnews", "brave")):
                         query_terms.extend(self._source_query_terms(raw_item))
                     mention = self._build_mention(raw_item, query_terms, backfill=backfill)
                     if since and mention.published_at and mention.published_at < since:
@@ -112,6 +112,9 @@ class MonitorPipeline:
         raw_text = normalize_text(raw_item.raw_text)
         canonical = canonicalize_url(raw_item.source_url)
         matched = find_keywords(f"{title}\n{raw_text}", keyword_terms)
+        if raw_item.source_name.startswith(("brave", "serpapi", "gnews")):
+            matched.append("search_api_query_hit")
+            matched = sorted(set(matched), key=str.lower)
         digest = content_hash(title, raw_text)
         fingerprint = event_fingerprint(title, raw_text, matched)
         return Mention(
@@ -138,11 +141,15 @@ class MonitorPipeline:
 
     @staticmethod
     def _source_query_terms(raw_item: RawItem) -> List[str]:
-        title = raw_item.title.lower()
+        text = f"{raw_item.title}\n{raw_item.raw_text}".lower()
         derived = []
         for token in ["ocoopa", "ocopa", "lawsuit", "fire", "death", "recall", "cpsc", "class action"]:
-            if token in title:
+            if token in text:
                 derived.append(token)
+        if raw_item.source_type in {"search", "news"} and raw_item.source_name.startswith(
+            ("brave", "serpapi", "gnews")
+        ):
+            derived.extend(["search_api_query_hit", "Ocoopa"])
         return derived
 
     @staticmethod
