@@ -6,7 +6,7 @@ import sys
 from typing import Any, Dict
 
 from .config import load_settings
-from .db import Database
+from .db import create_database
 from .doctor import run_doctor
 from .keywords import DEFAULT_KEYWORDS
 from .pipeline import MonitorPipeline
@@ -36,11 +36,11 @@ def main() -> None:
 
     args = parser.parse_args()
     settings = load_settings()
-    db = Database(settings.db_path)
+    db = create_database(settings)
 
     if args.command == "init-db":
         db.init()
-        print(f"initialized database: {settings.db_path}")
+        print("initialized database")
         return
     if args.command == "seed":
         db.init()

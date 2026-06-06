@@ -8,6 +8,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Settings:
     db_path: str
+    db_url: str
     alert_channel: str
     alert_webhook_url: str
     alert_webhook_secret: str
@@ -30,6 +31,7 @@ class Settings:
 def load_settings() -> Settings:
     return Settings(
         db_path=os.getenv("OCOOPA_DB_PATH", str(Path.cwd() / "ocoopa_monitor.db")),
+        db_url=os.getenv("OCOOPA_DB_URL", os.getenv("DATABASE_URL", "")),
         alert_channel=os.getenv("OCOOPA_ALERT_CHANNEL", "generic"),
         alert_webhook_url=os.getenv("OCOOPA_ALERT_WEBHOOK_URL", ""),
         alert_webhook_secret=os.getenv("OCOOPA_ALERT_WEBHOOK_SECRET", ""),

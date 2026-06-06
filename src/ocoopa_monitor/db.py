@@ -21,7 +21,15 @@ def dt_to_str(value: Optional[datetime]) -> Optional[str]:
 def str_to_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
+    if isinstance(value, datetime):
+        return value
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def create_database(settings) -> "Database":
+    if getattr(settings, "db_url", ""):
+        return PostgresDatabase(settings.db_url)
+    return Database(settings.db_path)
 
 
 class Database:
@@ -504,6 +512,496 @@ class Database:
                 ),
             )
             return int(cur.lastrowid)
+
+
+class PostgresDatabase:
+    def __init__(self, db_url: str):
+        self.db_url = db_url
+
+    @contextmanager
+    def connect(self):
+        psycopg, dict_row, _ = self._pg_modules()
+        conn = psycopg.connect(self.db_url, row_factory=dict_row)
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def init(self) -> None:
+        migration = _postgres_migration_sql()
+        with self.connect() as conn:
+            for statement in migration.split(";"):
+                statement = statement.strip()
+                if statement:
+                    conn.execute(statement)
+
+    def seed_keywords(self, keywords: Iterable[Keyword]) -> None:
+        now = utcnow()
+        with self.connect() as conn:
+            for kw in keywords:
+                conn.execute(
+                    """
+                    INSERT INTO keywords(term, category, lane, active, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(term) DO UPDATE SET
+                        category=excluded.category,
+                        lane=excluded.lane,
+                        active=excluded.active,
+                        updated_at=excluded.updated_at
+                    """,
+                    (kw.term, kw.category, kw.lane, kw.active, now, now),
+                )
+
+    def get_keywords(self, lane: Optional[str] = None) -> List[Keyword]:
+        sql = "SELECT term, category, lane, active FROM keywords WHERE active=TRUE"
+        params: List[Any] = []
+        if lane == "high":
+            sql += " AND lane=%s"
+            params.append("high")
+        elif lane == "regular":
+            sql += " AND lane IN ('high', 'regular')"
+        sql += " ORDER BY term"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [Keyword(row["term"], row["category"], row["lane"], bool(row["active"])) for row in rows]
+
+    def seed_sources(self, sources: Iterable[SourceConfig]) -> None:
+        now = utcnow()
+        with self.connect() as conn:
+            for source in sources:
+                source_row = conn.execute(
+                    """
+                    INSERT INTO source_configs(
+                        source_name, source_type, priority, lane, method, url, active,
+                        alert_threshold_minutes, created_at, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT(source_name) DO UPDATE SET
+                        source_type=excluded.source_type,
+                        priority=excluded.priority,
+                        lane=excluded.lane,
+                        method=excluded.method,
+                        url=excluded.url,
+                        active=excluded.active,
+                        alert_threshold_minutes=excluded.alert_threshold_minutes,
+                        updated_at=excluded.updated_at
+                    RETURNING id
+                    """,
+                    (
+                        source.source_name,
+                        source.source_type,
+                        source.priority,
+                        source.lane,
+                        source.method,
+                        source.url,
+                        source.active,
+                        source.alert_threshold_minutes,
+                        now,
+                        now,
+                    ),
+                ).fetchone()
+                source_id = int(source_row["id"])
+                conn.execute(
+                    """
+                    INSERT INTO source_health(
+                        source_id, source_name, priority, lane, health_status, alert_threshold_minutes
+                    )
+                    VALUES (%s, %s, %s, %s, 'unknown', %s)
+                    ON CONFLICT(source_id) DO UPDATE SET
+                        source_name=excluded.source_name,
+                        priority=excluded.priority,
+                        lane=excluded.lane,
+                        alert_threshold_minutes=excluded.alert_threshold_minutes
+                    """,
+                    (
+                        source_id,
+                        source.source_name,
+                        source.priority,
+                        source.lane,
+                        source.alert_threshold_minutes,
+                    ),
+                )
+
+    def get_sources(self, lane: Optional[str] = None) -> List[SourceConfig]:
+        sql = "SELECT * FROM source_configs WHERE active=TRUE"
+        params: List[Any] = []
+        if lane:
+            sql += " AND lane=%s"
+            params.append(lane)
+        sql += " ORDER BY priority, source_name"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            SourceConfig(
+                source_name=row["source_name"],
+                source_type=row["source_type"],
+                priority=row["priority"],
+                lane=row["lane"],
+                method=row["method"],
+                url=row["url"],
+                active=bool(row["active"]),
+                alert_threshold_minutes=int(row["alert_threshold_minutes"]),
+                id=int(row["id"]),
+            )
+            for row in rows
+        ]
+
+    def record_source_attempt(self, source: SourceConfig) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE source_health SET last_attempt_at=%s WHERE source_id=%s",
+                (utcnow(), source.id),
+            )
+
+    def record_source_success(self, source: SourceConfig) -> None:
+        now = utcnow()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE source_health
+                SET last_success_at=%s, last_attempt_at=%s, consecutive_failures=0,
+                    last_error=NULL, health_status='ok'
+                WHERE source_id=%s
+                """,
+                (now, now, source.id),
+            )
+
+    def record_source_failure(self, source: SourceConfig, error: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE source_health
+                SET last_attempt_at=%s, consecutive_failures=consecutive_failures + 1,
+                    last_error=%s, health_status='failing'
+                WHERE source_id=%s
+                """,
+                (utcnow(), error[:1000], source.id),
+            )
+
+    def unhealthy_sources(self, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        now = now or utcnow()
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM source_health").fetchall()
+        unhealthy = []
+        for row in rows:
+            last_success = str_to_dt(row["last_success_at"])
+            threshold = int(row["alert_threshold_minutes"])
+            status = row["health_status"]
+            stale = last_success is None or (now - last_success).total_seconds() > threshold * 60
+            if row["priority"] == "P0" and stale:
+                unhealthy.append(dict(row))
+            elif status == "failing" and int(row["consecutive_failures"]) > 0:
+                unhealthy.append(dict(row))
+        return unhealthy
+
+    def upsert_mention(self, mention: Mention) -> Mention:
+        _, _, Json = self._pg_modules()
+        now = utcnow()
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT id, content_hash, first_seen_at FROM mentions WHERE canonical_url=%s",
+                (mention.canonical_url,),
+            ).fetchone()
+            if existing:
+                mention.id = int(existing["id"])
+                mention.is_new = False
+                mention.is_updated = existing["content_hash"] != mention.content_hash
+                mention.first_seen_at = str_to_dt(existing["first_seen_at"]) or mention.first_seen_at
+                conn.execute(
+                    """
+                    UPDATE mentions SET
+                        title=%s, raw_text=%s, text_excerpt=%s, matched_keywords=%s,
+                        content_hash=%s, event_fingerprint=%s, is_new=FALSE, is_updated=%s,
+                        backfill=backfill AND %s, fetched_at=%s, updated_at=%s
+                    WHERE id=%s
+                    """,
+                    (
+                        mention.title,
+                        mention.raw_text,
+                        mention.text_excerpt,
+                        Json(mention.matched_keywords),
+                        mention.content_hash,
+                        mention.event_fingerprint,
+                        mention.is_updated,
+                        mention.backfill,
+                        mention.fetched_at,
+                        now,
+                        mention.id,
+                    ),
+                )
+                return mention
+            row = conn.execute(
+                """
+                INSERT INTO mentions(
+                    source_type, source_name, source_url, canonical_url, title,
+                    author_or_publisher, published_at, fetched_at, first_seen_at,
+                    language, country_or_market, raw_text, text_excerpt, matched_keywords,
+                    content_hash, event_fingerprint, duplicate_group_id, is_new, is_updated,
+                    backfill, tos_method, fetch_status, fetch_error, created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    mention.source_type,
+                    mention.source_name,
+                    mention.source_url,
+                    mention.canonical_url,
+                    mention.title,
+                    mention.author_or_publisher,
+                    mention.published_at,
+                    mention.fetched_at,
+                    mention.first_seen_at,
+                    mention.language,
+                    mention.country_or_market,
+                    mention.raw_text,
+                    mention.text_excerpt,
+                    Json(mention.matched_keywords),
+                    mention.content_hash,
+                    mention.event_fingerprint,
+                    mention.duplicate_group_id,
+                    mention.is_new,
+                    mention.is_updated,
+                    mention.backfill,
+                    mention.tos_method,
+                    mention.fetch_status,
+                    mention.fetch_error,
+                    now,
+                    now,
+                ),
+            ).fetchone()
+            mention.id = int(row["id"])
+        return mention
+
+    def insert_analysis(self, result: AnalysisResult) -> AnalysisResult:
+        _, _, Json = self._pg_modules()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO analysis_results(
+                    mention_id, model_provider, model_name, prompt_version, sentiment,
+                    risk_level, category, summary_zh, key_quotes, key_quote_offsets,
+                    requires_escalation, escalation_reason, confidence,
+                    evidence_check_passed, evidence_check_notes, needs_human_review,
+                    analysis_created_at, review_status
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    result.mention_id,
+                    result.model_provider,
+                    result.model_name,
+                    result.prompt_version,
+                    result.sentiment,
+                    result.risk_level,
+                    result.category,
+                    result.summary_zh,
+                    Json(result.key_quotes),
+                    Json(result.key_quote_offsets),
+                    result.requires_escalation,
+                    result.escalation_reason,
+                    result.confidence,
+                    result.evidence_check_passed,
+                    result.evidence_check_notes,
+                    result.needs_human_review,
+                    result.analysis_created_at,
+                    result.review_status,
+                ),
+            ).fetchone()
+            result.id = int(row["id"])
+        return result
+
+    def upsert_incident_group(self, mention: Mention, analysis: AnalysisResult) -> int:
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT id, mention_count, risk_level_max FROM incident_groups WHERE fingerprint=%s",
+                (mention.event_fingerprint,),
+            ).fetchone()
+            if existing:
+                risk_level = max_risk(str(existing["risk_level_max"]), analysis.risk_level)
+                conn.execute(
+                    """
+                    UPDATE incident_groups
+                    SET last_seen_at=%s, risk_level_max=%s, mention_count=mention_count + %s,
+                        source_count=(
+                            SELECT COUNT(DISTINCT source_name)
+                            FROM mentions
+                            WHERE event_fingerprint=%s
+                        )
+                    WHERE id=%s
+                    """,
+                    (
+                        mention.fetched_at,
+                        risk_level,
+                        1 if mention.is_new else 0,
+                        mention.event_fingerprint,
+                        existing["id"],
+                    ),
+                )
+                return int(existing["id"])
+            row = conn.execute(
+                """
+                INSERT INTO incident_groups(
+                    fingerprint, primary_topic, first_seen_at, last_seen_at, risk_level_max,
+                    mention_count, source_count, representative_mention_id, status, notes
+                )
+                VALUES (%s, %s, %s, %s, %s, 1, 1, %s, 'active', NULL)
+                RETURNING id
+                """,
+                (
+                    mention.event_fingerprint,
+                    mention.title[:300],
+                    mention.first_seen_at,
+                    mention.fetched_at,
+                    analysis.risk_level,
+                    mention.id,
+                ),
+            ).fetchone()
+            return int(row["id"])
+
+    def alert_exists(self, dedupe_key: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute("SELECT 1 FROM alerts WHERE dedupe_key=%s", (dedupe_key,)).fetchone()
+        return row is not None
+
+    def insert_alert(
+        self,
+        mention_id: int,
+        incident_group_id: Optional[int],
+        risk_level: str,
+        alert_reason: str,
+        dedupe_key: str,
+        confidence: float,
+        evidence_check_passed: bool,
+        needs_human_review: bool,
+        delivery_latency_seconds: Optional[int],
+        sent_to: Optional[str],
+        sent_at: Optional[datetime],
+    ) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO alerts(
+                    mention_id, incident_group_id, risk_level, alert_reason, dedupe_key,
+                    confidence, evidence_check_passed, needs_human_review,
+                    delivery_latency_seconds, sent_to, sent_at, ack_status, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
+                RETURNING id
+                """,
+                (
+                    mention_id,
+                    incident_group_id,
+                    risk_level,
+                    alert_reason,
+                    dedupe_key,
+                    confidence,
+                    evidence_check_passed,
+                    needs_human_review,
+                    delivery_latency_seconds,
+                    sent_to,
+                    sent_at,
+                    utcnow(),
+                ),
+            ).fetchone()
+            return int(row["id"])
+
+    def fetch_mentions_between(self, start_at: datetime, end_at: datetime) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT m.*, a.sentiment, a.risk_level, a.category, a.summary_zh,
+                       a.escalation_reason, a.confidence, a.evidence_check_passed,
+                       a.needs_human_review
+                FROM mentions m
+                LEFT JOIN analysis_results a ON a.mention_id=m.id
+                WHERE m.fetched_at >= %s AND m.fetched_at < %s
+                ORDER BY
+                    CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
+                    m.fetched_at DESC
+                """,
+                (start_at, end_at),
+            ).fetchall()
+
+    def fetch_mentions_for_day(self, date_prefix: str) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT m.*, a.sentiment, a.risk_level, a.category, a.summary_zh,
+                       a.escalation_reason, a.confidence, a.evidence_check_passed,
+                       a.needs_human_review
+                FROM mentions m
+                LEFT JOIN analysis_results a ON a.mention_id=m.id
+                WHERE m.fetched_at >= %s::date AND m.fetched_at < (%s::date + INTERVAL '1 day')
+                ORDER BY
+                    CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
+                    m.fetched_at DESC
+                """,
+                (date_prefix, date_prefix),
+            ).fetchall()
+
+    def insert_daily_report(self, report: Dict[str, Any]) -> int:
+        _, _, Json = self._pg_modules()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO daily_reports(
+                    report_date, timezone, total_mentions, new_mentions, backfill_mentions,
+                    sentiment_distribution, source_distribution, risk_distribution,
+                    top_risks, trend_vs_yesterday, recommended_actions,
+                    generated_text_zh, delivery_status, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(report_date, timezone) DO UPDATE SET
+                    total_mentions=excluded.total_mentions,
+                    new_mentions=excluded.new_mentions,
+                    backfill_mentions=excluded.backfill_mentions,
+                    sentiment_distribution=excluded.sentiment_distribution,
+                    source_distribution=excluded.source_distribution,
+                    risk_distribution=excluded.risk_distribution,
+                    top_risks=excluded.top_risks,
+                    trend_vs_yesterday=excluded.trend_vs_yesterday,
+                    recommended_actions=excluded.recommended_actions,
+                    generated_text_zh=excluded.generated_text_zh,
+                    delivery_status=excluded.delivery_status,
+                    created_at=excluded.created_at
+                RETURNING id
+                """,
+                (
+                    report["report_date"],
+                    report["timezone"],
+                    report["total_mentions"],
+                    report["new_mentions"],
+                    report["backfill_mentions"],
+                    Json(report["sentiment_distribution"]),
+                    Json(report["source_distribution"]),
+                    Json(report["risk_distribution"]),
+                    Json(report["top_risks"]),
+                    Json(report["trend_vs_yesterday"]),
+                    Json(report["recommended_actions"]),
+                    report["generated_text_zh"],
+                    report["delivery_status"],
+                    utcnow(),
+                ),
+            ).fetchone()
+            return int(row["id"])
+
+    @staticmethod
+    def _pg_modules():
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+            from psycopg.types.json import Jsonb
+        except ImportError as exc:
+            raise RuntimeError("Postgres runtime requires psycopg. Install package with postgres support.") from exc
+        return psycopg, dict_row, Jsonb
+
+
+def _postgres_migration_sql() -> str:
+    migration_path = Path(__file__).resolve().parents[2] / "migrations" / "001_initial_postgres.sql"
+    return migration_path.read_text(encoding="utf-8")
 
 
 def max_risk(left: str, right: str) -> str:
