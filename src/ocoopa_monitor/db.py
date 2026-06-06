@@ -26,6 +26,9 @@ def str_to_dt(value: Optional[str]) -> Optional[datetime]:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+BOOTSTRAP_KEY = "backfill_completed_at"
+
+
 def create_database(settings) -> "Database":
     if getattr(settings, "db_url", ""):
         return PostgresDatabase(settings.db_url)
@@ -98,8 +101,9 @@ class Database:
 
     def seed_sources(self, sources: Iterable[SourceConfig]) -> None:
         now = dt_to_str(utcnow())
+        source_list = list(sources)
         with self.connect() as conn:
-            for source in sources:
+            for source in source_list:
                 conn.execute(
                     """
                     INSERT INTO source_configs(
@@ -155,6 +159,38 @@ class Database:
                         source.alert_threshold_minutes,
                     ),
                 )
+            # Deactivate any source no longer in the seed list so config stays
+            # the single source of truth (e.g. retired commercial-API lanes).
+            keep = [s.source_name for s in source_list]
+            if keep:
+                placeholders = ",".join("?" for _ in keep)
+                conn.execute(
+                    f"UPDATE source_configs SET active=0, updated_at=? "
+                    f"WHERE source_name NOT IN ({placeholders})",
+                    (now, *keep),
+                )
+
+    # --- system_state (bootstrap / cold-start ordering) ---
+    def get_state(self, key: str) -> Optional[str]:
+        with self.connect() as conn:
+            row = conn.execute("SELECT value FROM system_state WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_state(self, key: str, value: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO system_state(key, value, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                """,
+                (key, value, dt_to_str(utcnow())),
+            )
+
+    def is_bootstrapped(self) -> bool:
+        return self.get_state(BOOTSTRAP_KEY) is not None
+
+    def mark_bootstrapped(self) -> None:
+        self.set_state(BOOTSTRAP_KEY, dt_to_str(utcnow()) or "")
 
     def get_sources(self, lane: Optional[str] = None) -> List[SourceConfig]:
         sql = "SELECT * FROM source_configs WHERE active=1"
@@ -568,8 +604,9 @@ class PostgresDatabase:
 
     def seed_sources(self, sources: Iterable[SourceConfig]) -> None:
         now = utcnow()
+        source_list = list(sources)
         with self.connect() as conn:
-            for source in sources:
+            for source in source_list:
                 source_row = conn.execute(
                     """
                     INSERT INTO source_configs(
@@ -622,6 +659,36 @@ class PostgresDatabase:
                         source.alert_threshold_minutes,
                     ),
                 )
+            keep = [s.source_name for s in source_list]
+            if keep:
+                placeholders = ",".join("%s" for _ in keep)
+                conn.execute(
+                    f"UPDATE source_configs SET active=FALSE, updated_at=%s "
+                    f"WHERE source_name NOT IN ({placeholders})",
+                    (now, *keep),
+                )
+
+    # --- system_state (bootstrap / cold-start ordering) ---
+    def get_state(self, key: str) -> Optional[str]:
+        with self.connect() as conn:
+            row = conn.execute("SELECT value FROM system_state WHERE key=%s", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_state(self, key: str, value: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO system_state(key, value, updated_at) VALUES (%s, %s, %s)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                """,
+                (key, value, utcnow()),
+            )
+
+    def is_bootstrapped(self) -> bool:
+        return self.get_state(BOOTSTRAP_KEY) is not None
+
+    def mark_bootstrapped(self) -> None:
+        self.set_state(BOOTSTRAP_KEY, (dt_to_str(utcnow()) or ""))
 
     def get_sources(self, lane: Optional[str] = None) -> List[SourceConfig]:
         sql = "SELECT * FROM source_configs WHERE active=TRUE"
@@ -1010,6 +1077,12 @@ def max_risk(left: str, right: str) -> str:
 
 
 SQLITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS system_state (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS keywords (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     term TEXT NOT NULL UNIQUE,
