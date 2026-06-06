@@ -1,3 +1,9 @@
+CREATE TABLE IF NOT EXISTS system_state (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS keywords (
     id BIGSERIAL PRIMARY KEY,
     term TEXT NOT NULL UNIQUE,

@@ -54,6 +54,10 @@ class MonitorPipeline:
             since = utcnow() - timedelta(days=since_days)
         keywords = self.db.get_keywords(lane)
         keyword_terms = [keyword.term for keyword in keywords]
+        # Real-time alerts only fire once the cold-start backfill is complete.
+        # A fresh / un-bootstrapped DB ingests and analyzes silently so the first
+        # deploy never produces an alert storm from pre-existing content.
+        realtime_enabled = (not backfill) and self.db.is_bootstrapped()
         stats = {
             "sources_attempted": 0,
             "sources_failed": 0,
@@ -64,6 +68,7 @@ class MonitorPipeline:
             "items_duplicate_skipped": 0,
             "mentions_processed": 0,
             "alerts_created": 0,
+            "alerts_suppressed_pre_bootstrap": 0,
         }
         for source in self.db.get_sources(lane):
             stats["sources_attempted"] += 1
@@ -92,13 +97,28 @@ class MonitorPipeline:
                     self.db.insert_analysis(analysis)
                     incident_group_id = self.db.upsert_incident_group(stored, analysis)
                     stats["mentions_processed"] += 1
-                    if self._should_alert(stored, analysis, backfill):
+                    if self._is_red_escalation(analysis) and not realtime_enabled:
+                        stats["alerts_suppressed_pre_bootstrap"] += 1
+                    if self._should_alert(stored, analysis, backfill, realtime_enabled):
                         if self._create_alert(stored, analysis, incident_group_id):
                             stats["alerts_created"] += 1
                 self.db.record_source_success(source)
             except Exception as exc:
                 stats["sources_failed"] += 1
                 self.db.record_source_failure(source, str(exc))
+        return stats
+
+    def bootstrap(self, since_days: int) -> Dict[str, Dict[str, int]]:
+        """Cold-start: silently backfill both lanes, then enable real-time alerts.
+
+        All ingested content is marked backfill=true and produces no alerts;
+        once both lanes finish, the bootstrap flag is set so subsequent runs
+        alert only on genuinely new post-backfill content.
+        """
+        stats: Dict[str, Dict[str, int]] = {}
+        for lane in ("high", "regular"):
+            stats[lane] = self.run_lane(lane, backfill=True, since_days=since_days)
+        self.db.mark_bootstrapped()
         return stats
 
     def _fetcher_for(self, source: SourceConfig) -> Fetcher:
@@ -161,10 +181,14 @@ class MonitorPipeline:
         return derived
 
     @staticmethod
-    def _should_alert(mention: Mention, analysis, backfill: bool) -> bool:
-        if backfill or mention.backfill:
-            return False
+    def _is_red_escalation(analysis) -> bool:
         return analysis.risk_level == "red" and analysis.requires_escalation
+
+    @staticmethod
+    def _should_alert(mention: Mention, analysis, backfill: bool, realtime_enabled: bool) -> bool:
+        if backfill or mention.backfill or not realtime_enabled:
+            return False
+        return MonitorPipeline._is_red_escalation(analysis)
 
     def _create_alert(self, mention: Mention, analysis, incident_group_id: int) -> bool:
         if mention.id is None:

@@ -24,6 +24,8 @@ def main() -> None:
     run_lane.add_argument("lane", choices=["high", "regular"])
     backfill = sub.add_parser("backfill")
     backfill.add_argument("--days", type=int, default=None)
+    bootstrap = sub.add_parser("bootstrap")
+    bootstrap.add_argument("--days", type=int, default=None)
     report = sub.add_parser("daily-report")
     report.add_argument("--timezone", default="Asia/Shanghai")
     health = sub.add_parser("health")
@@ -57,7 +59,18 @@ def main() -> None:
         db.init()
         days = args.days or settings.backfill_days
         pipeline = MonitorPipeline(db, settings)
-        print_json(pipeline.run_lane("high", backfill=True, since_days=days))
+        result = pipeline.run_lane("high", backfill=True, since_days=days)
+        db.mark_bootstrapped()
+        print_json(result)
+        return
+    if args.command == "bootstrap":
+        db.init()
+        db.seed_keywords(DEFAULT_KEYWORDS)
+        db.seed_sources(DEFAULT_SOURCES)
+        days = args.days or settings.backfill_days
+        pipeline = MonitorPipeline(db, settings)
+        stats = pipeline.bootstrap(days)
+        print_json({"bootstrap": "complete", "backfill_days": days, "stats": stats})
         return
     if args.command == "daily-report":
         db.init()

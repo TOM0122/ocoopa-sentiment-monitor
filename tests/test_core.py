@@ -18,6 +18,7 @@ from ocoopa_monitor.llm import DeepSeekProvider
 from ocoopa_monitor.models import AnalysisResult, RawItem, SourceConfig, utcnow
 from ocoopa_monitor.pipeline import MonitorPipeline
 from ocoopa_monitor.risk import RiskRuleEngine
+from ocoopa_monitor.sources import DEFAULT_SOURCES
 
 
 class StaticFetcher(Fetcher):
@@ -78,7 +79,7 @@ def settings(db_path):
 
 
 class CoreTests(unittest.TestCase):
-    def make_db(self):
+    def make_db(self, bootstrap: bool = True):
         tmp = tempfile.NamedTemporaryFile(delete=True)
         db = Database(tmp.name)
         db.init()
@@ -96,6 +97,8 @@ class CoreTests(unittest.TestCase):
                 )
             ]
         )
+        if bootstrap:
+            db.mark_bootstrapped()
         return db, tmp
 
     def test_backfill_does_not_create_alert(self):
@@ -550,6 +553,83 @@ class CoreTests(unittest.TestCase):
         with db.connect() as conn:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(alerts)").fetchall()}
         self.assertIn("delivery_latency_seconds", columns)
+
+    def _red_item(self, url: str) -> RawItem:
+        return RawItem(
+            source_type="news",
+            source_name="test_high",
+            source_url=url,
+            title="Ocoopa wrongful death lawsuit filed",
+            raw_text="Ocoopa wrongful death lawsuit filed after a hand warmer fire.",
+            published_at=utcnow(),
+        )
+
+    def test_realtime_alert_suppressed_until_bootstrap(self):
+        db, tmp = self.make_db(bootstrap=False)
+        self.assertFalse(db.is_bootstrapped())
+        pipeline = MonitorPipeline(
+            db,
+            settings(tmp.name),
+            fetchers={"static": StaticFetcher([self._red_item("https://example.com/a")])},
+        )
+        result = pipeline.run_lane("high")
+        # Pre-bootstrap: ingested + analyzed, but no alert fired.
+        self.assertEqual(result["mentions_processed"], 1)
+        self.assertEqual(result["alerts_created"], 0)
+        self.assertEqual(result["alerts_suppressed_pre_bootstrap"], 1)
+        with db.connect() as conn:
+            self.assertEqual(len(conn.execute("SELECT 1 FROM alerts").fetchall()), 0)
+            self.assertEqual(len(conn.execute("SELECT 1 FROM mentions").fetchall()), 1)
+        # After bootstrap, a genuinely new item alerts.
+        db.mark_bootstrapped()
+        pipeline2 = MonitorPipeline(
+            db,
+            settings(tmp.name),
+            fetchers={"static": StaticFetcher([self._red_item("https://example.com/b")])},
+        )
+        result2 = pipeline2.run_lane("high")
+        self.assertEqual(result2["alerts_created"], 1)
+
+    def test_bootstrap_runs_silently_and_enables_alerts(self):
+        db, tmp = self.make_db(bootstrap=False)
+        pipeline = MonitorPipeline(
+            db,
+            settings(tmp.name),
+            fetchers={"static": StaticFetcher([self._red_item("https://example.com/seed")])},
+        )
+        stats = pipeline.bootstrap(180)
+        self.assertTrue(db.is_bootstrapped())
+        self.assertEqual(stats["high"]["alerts_created"], 0)
+        with db.connect() as conn:
+            self.assertEqual(len(conn.execute("SELECT 1 FROM alerts").fetchall()), 0)
+            backfilled = conn.execute("SELECT backfill FROM mentions").fetchall()
+        self.assertTrue(all(row["backfill"] == 1 for row in backfilled))
+
+    def test_high_lane_uses_only_free_sources(self):
+        metered = {"brave_search", "serpapi", "gnews"}
+        high_methods = {s.method for s in DEFAULT_SOURCES if s.lane == "high"}
+        self.assertFalse(high_methods & metered, f"high lane must be free-only, got {high_methods}")
+        self.assertTrue({"rss", "api"} >= high_methods)
+        # Commercial APIs still present, but only on the hourly regular lane.
+        regular_methods = {s.method for s in DEFAULT_SOURCES if s.lane == "regular"}
+        self.assertIn("brave_search", regular_methods)
+        self.assertIn("gnews", regular_methods)
+
+    def test_seed_sources_deactivates_removed_source(self):
+        tmp = tempfile.NamedTemporaryFile(delete=True)
+        db = Database(tmp.name)
+        db.init()
+        db.seed_sources(
+            [
+                SourceConfig("keep_me", "news", "P0", "high", "rss", "x://keep", alert_threshold_minutes=120),
+                SourceConfig("drop_me", "search", "P1", "regular", "brave_search", "x://drop", alert_threshold_minutes=360),
+            ]
+        )
+        self.assertEqual({s.source_name for s in db.get_sources()}, {"keep_me", "drop_me"})
+        db.seed_sources(
+            [SourceConfig("keep_me", "news", "P0", "high", "rss", "x://keep", alert_threshold_minutes=120)]
+        )
+        self.assertEqual({s.source_name for s in db.get_sources()}, {"keep_me"})
 
 
 if __name__ == "__main__":
