@@ -22,6 +22,18 @@ RISK_TERMS = {
     "烧伤": ["烧伤", "burn"],
 }
 
+ENTITY_ALIASES = {
+    "亚马逊": ["amazon"],
+    "Amazon": ["亚马逊"],
+    "CPSC": ["美国消费品安全委员会", "消费品安全委员会", "consumer product safety commission"],
+    "美国消费品安全委员会": ["cpsc", "consumer product safety commission"],
+    "消费品安全委员会": ["cpsc", "consumer product safety commission"],
+    "加州": ["california", "ca"],
+    "California": ["加州"],
+    "过失致死": ["wrongful death"],
+    "wrongful death": ["过失致死"],
+}
+
 STOP_TERMS = {
     "发现",
     "相关",
@@ -158,4 +170,10 @@ class EvidenceChecker:
         if term.lower() in lowered_raw:
             return True
         aliases = RISK_TERMS.get(term, [])
-        return any(alias.lower() in lowered_raw for alias in aliases)
+        entity_aliases = ENTITY_ALIASES.get(term, [])
+        if any(alias.lower() in lowered_raw for alias in aliases + entity_aliases):
+            return True
+        for canonical, canonical_aliases in ENTITY_ALIASES.items():
+            if canonical in term and any(alias.lower() in lowered_raw for alias in canonical_aliases):
+                return True
+        return False
