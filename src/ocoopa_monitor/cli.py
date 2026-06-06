@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import timedelta
 from typing import Any, Dict
 
 from .config import load_settings
 from .db import create_database
+from .models import utcnow
 from .doctor import run_doctor
 from .keywords import DEFAULT_KEYWORDS
 from .pipeline import MonitorPipeline
@@ -35,6 +37,12 @@ def main() -> None:
     doctor = sub.add_parser("doctor")
     doctor.add_argument("--production", action="store_true")
     doctor.add_argument("--json", action="store_true")
+    review = sub.add_parser("review")
+    review.add_argument("action", choices=["list", "mark"])
+    review.add_argument("alert_id", type=int, nargs="?")
+    review.add_argument("status", nargs="?", choices=["confirmed", "false_positive", "muted"])
+    review.add_argument("--days", type=int, default=None, help="mute duration in days (muted only; omit = indefinite)")
+    review.add_argument("--limit", type=int, default=20)
 
     args = parser.parse_args()
     settings = load_settings()
@@ -100,6 +108,41 @@ def main() -> None:
         db.seed_keywords(DEFAULT_KEYWORDS)
         db.seed_sources(DEFAULT_SOURCES)
         SimpleScheduler(db, settings).run_forever(args.poll_seconds)
+        return
+    if args.command == "review":
+        db.init()
+        if args.action == "list":
+            rows = db.list_recent_alerts(args.limit)
+            if not rows:
+                print("no alerts yet")
+                return
+            for r in rows:
+                review_flag = " [需人工核实]" if r.get("needs_human_review") else ""
+                print(
+                    f"#{r['alert_id']} [{r['risk_level']}] incident={r.get('incident_status')}"
+                    f"{review_flag}\n    {r['title']}\n    {r['source_url']}\n    fingerprint={r['event_fingerprint']}"
+                )
+            return
+        if args.alert_id is None or args.status is None:
+            print("usage: review mark <alert_id> <confirmed|false_positive|muted> [--days N]")
+            sys.exit(1)
+        fingerprint = db.get_fingerprint_by_alert(args.alert_id)
+        if not fingerprint:
+            print(f"alert #{args.alert_id} not found")
+            sys.exit(1)
+        muted_until = None
+        if args.status == "muted" and args.days:
+            muted_until = utcnow() + timedelta(days=args.days)
+        updated = db.review_incident(fingerprint, args.status, muted_until)
+        print_json(
+            {
+                "alert_id": args.alert_id,
+                "fingerprint": fingerprint,
+                "review_status": args.status,
+                "muted_until": muted_until,
+                "updated": updated,
+            }
+        )
         return
     if args.command == "doctor":
         report = run_doctor(settings, production=args.production)

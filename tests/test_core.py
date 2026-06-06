@@ -640,6 +640,49 @@ class CoreTests(unittest.TestCase):
         )
         self.assertEqual({s.source_name for s in db.get_sources()}, {"keep_me"})
 
+    def test_false_positive_suppresses_future_alerts(self):
+        db, tmp = self.make_db()
+        p1 = MonitorPipeline(
+            db, settings(tmp.name),
+            fetchers={"static": StaticFetcher([self._red_item("https://example.com/fp-a")])},
+        )
+        self.assertEqual(p1.run_lane("high")["alerts_created"], 1)
+        fp = db.get_fingerprint_by_alert(db.list_recent_alerts(1)[0]["alert_id"])
+        self.assertTrue(db.review_incident(fp, "false_positive", None))
+        self.assertTrue(db.is_incident_suppressed(fp))
+        # Same event (same fingerprint, new URL) must no longer alert.
+        p2 = MonitorPipeline(
+            db, settings(tmp.name),
+            fetchers={"static": StaticFetcher([self._red_item("https://example.com/fp-b")])},
+        )
+        r2 = p2.run_lane("high")
+        self.assertEqual(r2["alerts_created"], 0)
+        self.assertEqual(r2["alerts_suppressed_muted"], 1)
+        with db.connect() as conn:
+            statuses = {row["review_status"] for row in conn.execute("SELECT review_status FROM analysis_results")}
+        self.assertIn("false_positive", statuses)
+
+    def test_mute_window_and_confirmed(self):
+        db, tmp = self.make_db()
+        p = MonitorPipeline(
+            db, settings(tmp.name),
+            fetchers={"static": StaticFetcher([self._red_item("https://example.com/m-a")])},
+        )
+        p.run_lane("high")
+        fp = db.get_fingerprint_by_alert(db.list_recent_alerts(1)[0]["alert_id"])
+        db.review_incident(fp, "muted", utcnow() + timedelta(days=7))
+        self.assertTrue(db.is_incident_suppressed(fp))
+        # Expired mute no longer suppresses.
+        db.review_incident(fp, "muted", utcnow() - timedelta(days=1))
+        self.assertFalse(db.is_incident_suppressed(fp))
+        # Confirmed keeps alerting (not suppressed).
+        db.review_incident(fp, "confirmed", None)
+        self.assertFalse(db.is_incident_suppressed(fp))
+
+    def test_review_incident_unknown_fingerprint_returns_false(self):
+        db, _ = self.make_db()
+        self.assertFalse(db.review_incident("nonexistent-fp", "muted", None))
+
 
 if __name__ == "__main__":
     unittest.main()

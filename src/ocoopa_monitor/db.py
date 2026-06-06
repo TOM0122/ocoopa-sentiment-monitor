@@ -59,6 +59,7 @@ class Database:
 
     def _migrate_sqlite(self, conn: sqlite3.Connection) -> None:
         self._add_column_if_missing(conn, "alerts", "delivery_latency_seconds", "INTEGER")
+        self._add_column_if_missing(conn, "incident_groups", "muted_until", "TEXT")
 
     @staticmethod
     def _add_column_if_missing(
@@ -470,6 +471,58 @@ class Database:
                 ),
             )
             return int(cur.lastrowid)
+
+    # --- M2 human feedback loop (review CLI) ---
+    def is_incident_suppressed(self, event_fingerprint: str, now: Optional[datetime] = None) -> bool:
+        now = now or utcnow()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT status, muted_until FROM incident_groups WHERE fingerprint=?",
+                (event_fingerprint,),
+            ).fetchone()
+        return _incident_suppressed(row["status"], str_to_dt(row["muted_until"]), now) if row else False
+
+    def review_incident(self, event_fingerprint: str, status: str, muted_until: Optional[datetime]) -> bool:
+        incident_status, review_status = _review_to_status(status)
+        with self.connect() as conn:
+            cur = conn.execute(
+                "UPDATE incident_groups SET status=?, muted_until=? WHERE fingerprint=?",
+                (incident_status, dt_to_str(muted_until), event_fingerprint),
+            )
+            if cur.rowcount == 0:
+                return False
+            conn.execute(
+                "UPDATE analysis_results SET review_status=? "
+                "WHERE mention_id IN (SELECT id FROM mentions WHERE event_fingerprint=?)",
+                (review_status, event_fingerprint),
+            )
+        return True
+
+    def get_fingerprint_by_alert(self, alert_id: int) -> Optional[str]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT m.event_fingerprint AS fp FROM alerts a "
+                "JOIN mentions m ON m.id=a.mention_id WHERE a.id=?",
+                (alert_id,),
+            ).fetchone()
+        return row["fp"] if row else None
+
+    def list_recent_alerts(self, limit: int = 20) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.id AS alert_id, a.risk_level, a.needs_human_review, a.ack_status,
+                       a.sent_at, m.event_fingerprint, m.title, m.source_url,
+                       g.status AS incident_status, g.muted_until
+                FROM alerts a
+                JOIN mentions m ON m.id=a.mention_id
+                LEFT JOIN incident_groups g ON g.fingerprint=m.event_fingerprint
+                ORDER BY a.id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def fetch_mentions_for_day(self, date_prefix: str) -> List[sqlite3.Row]:
         with self.connect() as conn:
@@ -975,6 +1028,58 @@ class PostgresDatabase:
             ).fetchone()
             return int(row["id"])
 
+    # --- M2 human feedback loop (review CLI) ---
+    def is_incident_suppressed(self, event_fingerprint: str, now: Optional[datetime] = None) -> bool:
+        now = now or utcnow()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT status, muted_until FROM incident_groups WHERE fingerprint=%s",
+                (event_fingerprint,),
+            ).fetchone()
+        return _incident_suppressed(row["status"], row["muted_until"], now) if row else False
+
+    def review_incident(self, event_fingerprint: str, status: str, muted_until: Optional[datetime]) -> bool:
+        incident_status, review_status = _review_to_status(status)
+        with self.connect() as conn:
+            cur = conn.execute(
+                "UPDATE incident_groups SET status=%s, muted_until=%s WHERE fingerprint=%s",
+                (incident_status, muted_until, event_fingerprint),
+            )
+            if cur.rowcount == 0:
+                return False
+            conn.execute(
+                "UPDATE analysis_results SET review_status=%s "
+                "WHERE mention_id IN (SELECT id FROM mentions WHERE event_fingerprint=%s)",
+                (review_status, event_fingerprint),
+            )
+        return True
+
+    def get_fingerprint_by_alert(self, alert_id: int) -> Optional[str]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT m.event_fingerprint AS fp FROM alerts a "
+                "JOIN mentions m ON m.id=a.mention_id WHERE a.id=%s",
+                (alert_id,),
+            ).fetchone()
+        return row["fp"] if row else None
+
+    def list_recent_alerts(self, limit: int = 20) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.id AS alert_id, a.risk_level, a.needs_human_review, a.ack_status,
+                       a.sent_at, m.event_fingerprint, m.title, m.source_url,
+                       g.status AS incident_status, g.muted_until
+                FROM alerts a
+                JOIN mentions m ON m.id=a.mention_id
+                LEFT JOIN incident_groups g ON g.fingerprint=m.event_fingerprint
+                ORDER BY a.id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def fetch_mentions_between(self, start_at: datetime, end_at: datetime) -> List[Dict[str, Any]]:
         with self.connect() as conn:
             return conn.execute(
@@ -1074,6 +1179,30 @@ def _postgres_migration_sql() -> str:
 def max_risk(left: str, right: str) -> str:
     order = {"green": 0, "yellow": 1, "red": 2}
     return left if order.get(left, 0) >= order.get(right, 0) else right
+
+
+REVIEW_STATUSES = ("confirmed", "false_positive", "muted")
+
+
+def _review_to_status(status: str):
+    mapping = {
+        "confirmed": ("monitoring", "confirmed"),
+        "false_positive": ("resolved", "false_positive"),
+        "muted": ("muted", "muted"),
+    }
+    if status not in mapping:
+        raise ValueError(f"invalid review status: {status} (expected one of {REVIEW_STATUSES})")
+    return mapping[status]
+
+
+def _incident_suppressed(status, muted_until, now) -> bool:
+    """A confirmed false positive (resolved) is suppressed forever; a muted
+    incident is suppressed until muted_until (None = indefinitely)."""
+    if status == "resolved":
+        return True
+    if status == "muted":
+        return muted_until is None or muted_until > now
+    return False
 
 
 SQLITE_SCHEMA = """
@@ -1189,6 +1318,7 @@ CREATE TABLE IF NOT EXISTS incident_groups (
     source_count INTEGER NOT NULL DEFAULT 0,
     representative_mention_id INTEGER REFERENCES mentions(id),
     status TEXT NOT NULL DEFAULT 'active',
+    muted_until TEXT,
     notes TEXT
 );
 

@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS incident_groups (
     source_count INTEGER NOT NULL DEFAULT 0,
     representative_mention_id BIGINT REFERENCES mentions(id),
     status TEXT NOT NULL DEFAULT 'active',
+    muted_until TIMESTAMPTZ,
     notes TEXT
 );
 
