@@ -58,6 +58,10 @@ class MonitorPipeline:
             "sources_attempted": 0,
             "sources_failed": 0,
             "items_fetched": 0,
+            "items_filtered_since": 0,
+            "items_filtered_no_keywords": 0,
+            "items_matched": 0,
+            "items_duplicate_skipped": 0,
             "mentions_processed": 0,
             "alerts_created": 0,
         }
@@ -74,11 +78,15 @@ class MonitorPipeline:
                         query_terms.extend(self._source_query_terms(raw_item))
                     mention = self._build_mention(raw_item, query_terms, backfill=backfill)
                     if since and mention.published_at and mention.published_at < since:
+                        stats["items_filtered_since"] += 1
                         continue
                     if not mention.matched_keywords:
+                        stats["items_filtered_no_keywords"] += 1
                         continue
+                    stats["items_matched"] += 1
                     stored = self.db.upsert_mention(mention)
                     if not stored.is_new and not stored.is_updated:
+                        stats["items_duplicate_skipped"] += 1
                         continue
                     analysis = self.analysis_service.analyze(stored)
                     self.db.insert_analysis(analysis)

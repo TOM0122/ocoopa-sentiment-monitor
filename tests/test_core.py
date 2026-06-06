@@ -395,9 +395,15 @@ class CoreTests(unittest.TestCase):
         )
         result = pipeline.run_lane("high")
         self.assertEqual(result["mentions_processed"], 1)
+        self.assertEqual(result["items_matched"], 1)
+        self.assertEqual(result["items_filtered_no_keywords"], 0)
         with db.connect() as conn:
             mention = conn.execute("SELECT matched_keywords FROM mentions").fetchone()
         self.assertIn("search_api_query_hit", mention["matched_keywords"])
+
+        duplicate_result = pipeline.run_lane("high")
+        self.assertEqual(duplicate_result["mentions_processed"], 0)
+        self.assertEqual(duplicate_result["items_duplicate_skipped"], 1)
 
     def test_init_migrates_existing_sqlite_alert_schema(self):
         tmp = tempfile.NamedTemporaryFile(delete=True)
