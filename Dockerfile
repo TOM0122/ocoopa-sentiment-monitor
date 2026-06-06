@@ -15,7 +15,4 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
 
 RUN mkdir -p /data
 
-VOLUME ["/data"]
-
 CMD ["python", "-m", "ocoopa_monitor.cli", "scheduler"]
-
