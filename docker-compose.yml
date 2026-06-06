@@ -4,10 +4,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      OCOOPA_DB_PATH: /data/ocoopa_monitor.db
     volumes:
       - ocoopa-data:/data
     command: ["python", "-m", "ocoopa_monitor.cli", "scheduler"]
 
 volumes:
   ocoopa-data:
-

@@ -31,10 +31,16 @@ For local development without installing the package, set:
 export PYTHONPATH="$PWD/src"
 ```
 
-The default database is `./ocoopa_monitor.db`. Override with:
+The default local database is SQLite at `./ocoopa_monitor.db`. Override the local path with:
 
 ```bash
 export OCOOPA_DB_PATH=/path/to/monitor.db
+```
+
+Production must use PostgreSQL. Set `OCOOPA_DB_URL` or Railway's injected `DATABASE_URL`:
+
+```bash
+export OCOOPA_DB_URL="postgresql://..."
 ```
 
 Run the built-in scheduler:
@@ -128,7 +134,7 @@ docker compose exec ocoopa-monitor python -m ocoopa_monitor.cli seed
 docker compose exec ocoopa-monitor python -m ocoopa_monitor.cli backfill --days 180
 ```
 
-The container stores the SQLite database in the `ocoopa-data` Docker volume at `/data/ocoopa_monitor.db`.
+Docker Compose is intended for local development and stores SQLite in the `ocoopa-data` Docker volume at `/data/ocoopa_monitor.db`. For production, use PostgreSQL instead of container-local SQLite.
 
 ## Railway Deployment
 
@@ -137,18 +143,20 @@ Railway can deploy this repository from GitHub using the included `Dockerfile` a
 Recommended Railway setup:
 
 1. Create a new Railway project from the GitHub repository.
-2. Add a persistent volume mounted at `/data`.
-3. Set the same environment variables shown in `.env.example`.
-4. Use `OCOOPA_DB_PATH=/data/ocoopa_monitor.db`.
-5. Run a one-off command after the first deploy:
+2. Add Railway's managed PostgreSQL service to the project.
+3. Attach the monitor service to the PostgreSQL service so Railway injects `DATABASE_URL`.
+4. Set the same non-database environment variables shown in `.env.example`.
+5. Do not set `OCOOPA_DB_PATH` for production. Use `DATABASE_URL`, or set `OCOOPA_DB_URL` to the same value if you need an explicit override.
+6. Run one-off commands after the first deploy:
 
 ```bash
 python -m ocoopa_monitor.cli doctor --production
+python -m ocoopa_monitor.cli init-db
 python -m ocoopa_monitor.cli seed
 python -m ocoopa_monitor.cli backfill --days 180
 ```
 
-The Railway service start command is `python -m ocoopa_monitor.cli scheduler`.
+The Railway service start command is `python -m ocoopa_monitor.cli scheduler`. It runs the PostgreSQL migration idempotently on startup before seeding and scheduling.
 
 ## Human Setup Checklist
 

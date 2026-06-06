@@ -6,7 +6,7 @@ except ImportError:  # pragma: no cover - optional runtime dependency
     FastAPI = None  # type: ignore
 
 from .config import load_settings
-from .db import Database
+from .db import create_database
 from .keywords import DEFAULT_KEYWORDS
 from .pipeline import MonitorPipeline
 from .reports import DailyReportService
@@ -17,7 +17,7 @@ from .sources import DEFAULT_SOURCES
 if FastAPI is not None:
     app = FastAPI(title="Ocoopa Public Opinion Monitor")
     settings = load_settings()
-    db = Database(settings.db_path)
+    db = create_database(settings)
 
     @app.on_event("startup")
     def startup() -> None:

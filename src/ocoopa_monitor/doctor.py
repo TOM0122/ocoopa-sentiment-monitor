@@ -19,6 +19,9 @@ def run_doctor(settings, production: bool = False) -> DoctorReport:
     if settings.backfill_days != 180:
         warnings.append("OCOOPA_BACKFILL_DAYS should remain 180 unless business/legal approves a change.")
 
+    if production and not settings.db_url:
+        errors.append("Production must use Railway PostgreSQL via OCOOPA_DB_URL or DATABASE_URL.")
+
     if settings.llm_provider == "deepseek":
         if not settings.llm_api_key:
             errors.append("OCOOPA_LLM_API_KEY is required when OCOOPA_LLM_PROVIDER=deepseek.")
@@ -48,7 +51,9 @@ def run_doctor(settings, production: bool = False) -> DoctorReport:
         warnings.append("OCOOPA_GNEWS_API_KEY is missing; commercial news recall will be reduced.")
 
     summary = {
+        "db_backend": "postgres" if settings.db_url else "sqlite",
         "db_path": settings.db_path,
+        "db_url_configured": bool(settings.db_url),
         "alert_channel": settings.alert_channel,
         "dingtalk_webhook_configured": bool(settings.alert_webhook_url),
         "dingtalk_secret_configured": bool(settings.alert_webhook_secret),

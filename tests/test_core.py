@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from ocoopa_monitor.analysis import AnalysisService
 from ocoopa_monitor.config import Settings
-from ocoopa_monitor.db import Database, dt_to_str
+from ocoopa_monitor.db import Database, PostgresDatabase, create_database, dt_to_str
 from ocoopa_monitor.delivery import DeliveryClient, DingTalkRobotChannel
 from ocoopa_monitor.doctor import run_doctor
 from ocoopa_monitor.evidence import EvidenceChecker
@@ -56,6 +56,7 @@ class NeedsReviewRedAnalysisService:
 def settings(db_path):
     return Settings(
         db_path=db_path,
+        db_url="",
         alert_channel="generic",
         alert_webhook_url="",
         alert_webhook_secret="",
@@ -398,6 +399,7 @@ class CoreTests(unittest.TestCase):
     def test_production_doctor_requires_deepseek_and_dingtalk_secrets(self):
         report = run_doctor(settings("/tmp/test.db"), production=True)
         self.assertFalse(report.ok)
+        self.assertTrue(any("OCOOPA_DB_URL" in error or "DATABASE_URL" in error for error in report.errors))
         self.assertTrue(any("OCOOPA_LLM_PROVIDER=deepseek" in error for error in report.errors))
         self.assertTrue(any("OCOOPA_ALERT_CHANNEL=dingtalk" in error for error in report.errors))
         self.assertFalse(report.settings_summary["llm_api_key_configured"])
@@ -406,6 +408,7 @@ class CoreTests(unittest.TestCase):
         base = settings("/tmp/test.db")
         prod_settings = type(base)(
             db_path=base.db_path,
+            db_url="postgresql://user:pass@example.com:5432/db",
             alert_channel="dingtalk",
             alert_webhook_url="https://oapi.dingtalk.com/robot/send?access_token=xxx",
             alert_webhook_secret="secret",
@@ -427,6 +430,34 @@ class CoreTests(unittest.TestCase):
         report = run_doctor(prod_settings, production=True)
         self.assertTrue(report.ok)
         self.assertEqual(report.errors, [])
+        self.assertEqual(report.settings_summary["db_backend"], "postgres")
+        self.assertTrue(report.settings_summary["db_url_configured"])
+
+    def test_database_factory_prefers_postgres_url(self):
+        base = settings("/tmp/local.db")
+        pg_settings = type(base)(
+            db_path=base.db_path,
+            db_url="postgresql://user:pass@example.com:5432/db",
+            alert_channel=base.alert_channel,
+            alert_webhook_url=base.alert_webhook_url,
+            alert_webhook_secret=base.alert_webhook_secret,
+            alert_at_mobiles=base.alert_at_mobiles,
+            alert_rate_limit_per_minute=base.alert_rate_limit_per_minute,
+            llm_provider=base.llm_provider,
+            llm_model=base.llm_model,
+            llm_api_key=base.llm_api_key,
+            llm_base_url=base.llm_base_url,
+            serpapi_api_key=base.serpapi_api_key,
+            brave_search_api_key=base.brave_search_api_key,
+            gnews_api_key=base.gnews_api_key,
+            high_lane_interval_minutes=base.high_lane_interval_minutes,
+            regular_lane_interval_minutes=base.regular_lane_interval_minutes,
+            p0_health_threshold_minutes=base.p0_health_threshold_minutes,
+            backfill_days=base.backfill_days,
+            request_timeout_seconds=base.request_timeout_seconds,
+        )
+        self.assertIsInstance(create_database(pg_settings), PostgresDatabase)
+        self.assertIsInstance(create_database(base), Database)
 
     def test_brave_search_uses_single_high_sensitivity_boolean_query(self):
         captured = {}
