@@ -67,7 +67,7 @@ class DingTalkRobotChannel(DeliveryChannel):
                 "text": text,
             },
             "at": {
-                "atMobiles": self.at_mobiles,
+                "atMobiles": [] if payload.get("needs_human_review") else self.at_mobiles,
                 "isAtAll": False,
             },
         }

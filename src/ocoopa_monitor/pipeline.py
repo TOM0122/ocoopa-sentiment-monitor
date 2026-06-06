@@ -164,12 +164,7 @@ class MonitorPipeline:
     def _should_alert(mention: Mention, analysis, backfill: bool) -> bool:
         if backfill or mention.backfill:
             return False
-        return (
-            analysis.risk_level == "red"
-            and analysis.requires_escalation
-            and analysis.evidence_check_passed
-            and not analysis.needs_human_review
-        )
+        return analysis.risk_level == "red" and analysis.requires_escalation
 
     def _create_alert(self, mention: Mention, analysis, incident_group_id: int) -> bool:
         if mention.id is None:

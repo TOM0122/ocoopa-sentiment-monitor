@@ -15,7 +15,7 @@ from ocoopa_monitor.fetchers.base import Fetcher
 from ocoopa_monitor.fetchers.search_api import BraveSearchFetcher, SerpAPIFetcher
 from ocoopa_monitor.keywords import DEFAULT_KEYWORDS
 from ocoopa_monitor.llm import DeepSeekProvider
-from ocoopa_monitor.models import RawItem, SourceConfig, utcnow
+from ocoopa_monitor.models import AnalysisResult, RawItem, SourceConfig, utcnow
 from ocoopa_monitor.pipeline import MonitorPipeline
 from ocoopa_monitor.risk import RiskRuleEngine
 
@@ -29,6 +29,28 @@ class StaticFetcher(Fetcher):
         if self.error:
             raise RuntimeError(self.error)
         return self.items
+
+
+class NeedsReviewRedAnalysisService:
+    def analyze(self, mention):
+        return AnalysisResult(
+            mention_id=mention.id,
+            model_provider="test",
+            model_name="needs-review-red",
+            prompt_version="test",
+            sentiment="negative",
+            risk_level="red",
+            category="lawsuit",
+            summary_zh="需人工核实的红色风险",
+            key_quotes=[],
+            key_quote_offsets=[],
+            requires_escalation=True,
+            escalation_reason="low_confidence_red_signal",
+            confidence=0.42,
+            evidence_check_passed=False,
+            evidence_check_notes="low_confidence; summary_not_grounded",
+            needs_human_review=True,
+        )
 
 
 def settings(db_path):
@@ -285,6 +307,70 @@ class CoreTests(unittest.TestCase):
         self.assertIn("sign=", captured["url"])
         self.assertIn('"msgtype": "markdown"', captured["body"])
         self.assertIn("13800000000", captured["body"])
+
+    def test_dingtalk_does_not_at_mobiles_for_human_review_red_alert(self):
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"errcode":0,"errmsg":"ok"}'
+
+        def fake_urlopen(request, timeout=10):
+            captured["body"] = request.data.decode("utf-8")
+            return FakeResponse()
+
+        channel = DingTalkRobotChannel(
+            webhook_url="https://oapi.dingtalk.com/robot/send?access_token=abc",
+            secret="ding-secret",
+            at_mobiles=["13800000000"],
+            rate_limit_per_minute=20,
+        )
+        payload = DeliveryClient(channel).alert_payload(
+            title="Ocoopa low confidence red",
+            url="https://example.com",
+            risk_level="red",
+            reason="low_confidence_red_signal",
+            confidence=0.42,
+            evidence_check_passed=False,
+            needs_human_review=True,
+            sent_at=utcnow(),
+            delivery_latency_seconds=42,
+        )
+        with patch("ocoopa_monitor.delivery.urlopen", side_effect=fake_urlopen):
+            DeliveryClient(channel).send_alert(payload)
+        self.assertIn("需人工核实", captured["body"])
+        self.assertIn('"atMobiles": []', captured["body"])
+        self.assertNotIn("13800000000", captured["body"])
+
+    def test_needs_review_red_alert_is_not_silently_withheld(self):
+        db, tmp = self.make_db()
+        item = RawItem(
+            source_type="news",
+            source_name="test_high",
+            source_url="https://example.com/ocoopa-unverified-red",
+            title="Ocoopa unverified red risk",
+            raw_text="Ocoopa lawsuit signal with limited evidence.",
+            published_at=utcnow(),
+        )
+        pipeline = MonitorPipeline(
+            db,
+            settings(tmp.name),
+            analysis_service=NeedsReviewRedAnalysisService(),
+            fetchers={"static": StaticFetcher([item])},
+        )
+        result = pipeline.run_lane("high")
+        self.assertEqual(result["alerts_created"], 1)
+        with db.connect() as conn:
+            alert = conn.execute("SELECT * FROM alerts").fetchone()
+        self.assertEqual(alert["risk_level"], "red")
+        self.assertEqual(alert["evidence_check_passed"], 0)
+        self.assertEqual(alert["needs_human_review"], 1)
 
     def test_serpapi_uses_single_high_sensitivity_boolean_query(self):
         captured = {}
