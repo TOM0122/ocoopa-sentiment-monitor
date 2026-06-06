@@ -377,6 +377,28 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Ocoopa+%28fire+OR+death+OR+lawsuit+OR+recall+OR+CPSC+OR+%22class+action%22%29", captured["url"])
         self.assertEqual(captured["token"], "secret")
 
+    def test_search_api_query_hit_is_retained_without_exact_brand_in_snippet(self):
+        db, tmp = self.make_db()
+        item = RawItem(
+            source_type="search",
+            source_name="brave_high_search",
+            source_url="https://example.com/amazon-hand-warmer-lawsuit",
+            title="Amazon hand warmers lawsuit claims defective products sparked fire",
+            raw_text="Lawsuit claims defective hand warmers sparked a fatal fire.",
+            published_at=utcnow(),
+            tos_method="api",
+        )
+        pipeline = MonitorPipeline(
+            db,
+            settings(tmp.name),
+            fetchers={"static": StaticFetcher([item])},
+        )
+        result = pipeline.run_lane("high")
+        self.assertEqual(result["mentions_processed"], 1)
+        with db.connect() as conn:
+            mention = conn.execute("SELECT matched_keywords FROM mentions").fetchone()
+        self.assertIn("search_api_query_hit", mention["matched_keywords"])
+
     def test_init_migrates_existing_sqlite_alert_schema(self):
         tmp = tempfile.NamedTemporaryFile(delete=True)
         db = Database(tmp.name)
