@@ -105,6 +105,7 @@ Commercial search/news APIs are optional but recommended for production recall:
 
 ```bash
 export OCOOPA_SERPAPI_API_KEY="..."
+export OCOOPA_BRAVE_SEARCH_API_KEY="..."
 export OCOOPA_GNEWS_API_KEY="..."
 ```
 
@@ -113,6 +114,8 @@ The high-sensitivity lane uses a single Boolean query per commercial source to c
 ```text
 Ocoopa (fire OR death OR lawsuit OR recall OR CPSC OR "class action")
 ```
+
+If SerpAPI is not available, use Brave Search API as the preferred drop-in search replacement by setting `OCOOPA_BRAVE_SEARCH_API_KEY`. SerpAPI can remain empty.
 
 ## Docker Deployment
 
@@ -127,6 +130,26 @@ docker compose exec ocoopa-monitor python -m ocoopa_monitor.cli backfill --days 
 
 The container stores the SQLite database in the `ocoopa-data` Docker volume at `/data/ocoopa_monitor.db`.
 
+## Railway Deployment
+
+Railway can deploy this repository from GitHub using the included `Dockerfile` and `railway.json`.
+
+Recommended Railway setup:
+
+1. Create a new Railway project from the GitHub repository.
+2. Add a persistent volume mounted at `/data`.
+3. Set the same environment variables shown in `.env.example`.
+4. Use `OCOOPA_DB_PATH=/data/ocoopa_monitor.db`.
+5. Run a one-off command after the first deploy:
+
+```bash
+python -m ocoopa_monitor.cli doctor --production
+python -m ocoopa_monitor.cli seed
+python -m ocoopa_monitor.cli backfill --days 180
+```
+
+The Railway service start command is `python -m ocoopa_monitor.cli scheduler`.
+
 ## Human Setup Checklist
 
 Before production cutover, a human operator must provide:
@@ -135,7 +158,7 @@ Before production cutover, a human operator must provide:
 - DingTalk robot signing secret.
 - Mobile numbers to @ for red alerts.
 - DeepSeek API key with access to the configured model.
-- SerpAPI API key.
+- Brave Search API key or SerpAPI API key.
 - GNews API key.
 - Deployment host or container runtime.
 
@@ -145,7 +168,7 @@ Do not commit `.env`, API keys, webhook secrets, or production database files.
 
 - Google News RSS searches for high-sensitivity and regular keyword queries.
 - CPSC Recall API via `saferproducts.gov` for recall monitoring.
-- SerpAPI and GNews are enabled when API keys are configured.
+- Brave Search, SerpAPI, and GNews are enabled when API keys are configured.
 - PRNewswire RSS is included as a regular-lane redundancy source.
 
 The CPSC source follows the public recall API documented by CPSC. Confirm live ToS, exact parameters, and rate limits before production deployment.

@@ -7,6 +7,15 @@ from .models import SourceConfig
 
 DEFAULT_SOURCES: List[SourceConfig] = [
     SourceConfig(
+        source_name="brave_high_search",
+        source_type="search",
+        priority="P0",
+        lane="high",
+        method="brave_search",
+        url="https://api.search.brave.com/res/v1/web/search",
+        alert_threshold_minutes=120,
+    ),
+    SourceConfig(
         source_name="serpapi_high_search",
         source_type="search",
         priority="P0",
@@ -41,6 +50,15 @@ DEFAULT_SOURCES: List[SourceConfig] = [
         method="api",
         url="http://www.saferproducts.gov/RestWebServices/Recall?format=json",
         alert_threshold_minutes=120,
+    ),
+    SourceConfig(
+        source_name="brave_regular_search",
+        source_type="search",
+        priority="P1",
+        lane="regular",
+        method="brave_search",
+        url="https://api.search.brave.com/res/v1/web/search",
+        alert_threshold_minutes=360,
     ),
     SourceConfig(
         source_name="serpapi_regular_search",

@@ -18,6 +18,7 @@ class Settings:
     llm_api_key: str
     llm_base_url: str
     serpapi_api_key: str
+    brave_search_api_key: str
     gnews_api_key: str
     high_lane_interval_minutes: int
     regular_lane_interval_minutes: int
@@ -39,6 +40,7 @@ def load_settings() -> Settings:
         llm_api_key=os.getenv("OCOOPA_LLM_API_KEY", ""),
         llm_base_url=os.getenv("OCOOPA_LLM_BASE_URL", "https://api.deepseek.com"),
         serpapi_api_key=os.getenv("OCOOPA_SERPAPI_API_KEY", ""),
+        brave_search_api_key=os.getenv("OCOOPA_BRAVE_SEARCH_API_KEY", ""),
         gnews_api_key=os.getenv("OCOOPA_GNEWS_API_KEY", ""),
         high_lane_interval_minutes=int(os.getenv("OCOOPA_HIGH_LANE_INTERVAL_MINUTES", "15")),
         regular_lane_interval_minutes=int(os.getenv("OCOOPA_REGULAR_LANE_INTERVAL_MINUTES", "60")),
