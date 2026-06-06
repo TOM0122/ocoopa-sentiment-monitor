@@ -157,7 +157,7 @@ class MonitorPipeline:
         if raw_item.source_type in {"search", "news"} and raw_item.source_name.startswith(
             ("brave", "serpapi", "gnews")
         ):
-            derived.extend(["search_api_query_hit", "Ocoopa"])
+            derived.append("search_api_query_hit")
         return derived
 
     @staticmethod
