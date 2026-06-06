@@ -128,6 +128,66 @@ class GNewsFetcher(Fetcher):
         return items
 
 
+class BraveSearchFetcher(Fetcher):
+    def __init__(self, api_key: str = "", timeout_seconds: int = 20):
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+
+    def fetch(
+        self,
+        source: SourceConfig,
+        keywords: Iterable[str],
+        since: Optional[datetime] = None,
+    ) -> List[RawItem]:
+        if not self.api_key:
+            return []
+        query = HIGH_SENSITIVITY_QUERY if source.lane == "high" else REGULAR_QUERY
+        params = urlencode(
+            {
+                "q": query,
+                "count": "10",
+                "country": "us",
+                "search_lang": "en",
+                "safesearch": "moderate",
+                "freshness": "pm" if source.lane == "high" else "py",
+            }
+        )
+        request = Request(
+            f"https://api.search.brave.com/res/v1/web/search?{params}",
+            headers={
+                "Accept": "application/json",
+                "X-Subscription-Token": self.api_key,
+                "User-Agent": "OcoopaMonitor/0.1",
+            },
+        )
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        results = data.get("web", {}).get("results", [])
+        items: List[RawItem] = []
+        for result in results:
+            title = normalize_text(str(result.get("title") or ""))
+            link = normalize_text(str(result.get("url") or ""))
+            description = normalize_text(str(result.get("description") or ""))
+            age = normalize_text(str(result.get("age") or ""))
+            if not link:
+                continue
+            items.append(
+                RawItem(
+                    source_type=source.source_type,
+                    source_name=source.source_name,
+                    source_url=link,
+                    title=title or link,
+                    raw_text=f"{title}\n{description}\n{age}",
+                    published_at=None,
+                    author_or_publisher="Brave Search",
+                    language="en",
+                    country_or_market="US",
+                    tos_method="api",
+                )
+            )
+        return items
+
+
 def _parse_iso(value: str) -> Optional[datetime]:
     if not value:
         return None

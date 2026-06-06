@@ -39,8 +39,11 @@ def run_doctor(settings, production: bool = False) -> DoctorReport:
     elif production:
         errors.append("Production must use OCOOPA_ALERT_CHANNEL=dingtalk per business decision.")
 
-    if not settings.serpapi_api_key:
-        warnings.append("OCOOPA_SERPAPI_API_KEY is missing; commercial search recall will be reduced.")
+    if not settings.serpapi_api_key and not settings.brave_search_api_key:
+        warnings.append(
+            "No commercial search API key configured. Set OCOOPA_BRAVE_SEARCH_API_KEY "
+            "or OCOOPA_SERPAPI_API_KEY."
+        )
     if not settings.gnews_api_key:
         warnings.append("OCOOPA_GNEWS_API_KEY is missing; commercial news recall will be reduced.")
 
@@ -55,6 +58,7 @@ def run_doctor(settings, production: bool = False) -> DoctorReport:
         "llm_base_url": settings.llm_base_url,
         "llm_api_key_configured": bool(settings.llm_api_key),
         "serpapi_configured": bool(settings.serpapi_api_key),
+        "brave_search_configured": bool(settings.brave_search_api_key),
         "gnews_configured": bool(settings.gnews_api_key),
         "high_lane_interval_minutes": settings.high_lane_interval_minutes,
         "regular_lane_interval_minutes": settings.regular_lane_interval_minutes,

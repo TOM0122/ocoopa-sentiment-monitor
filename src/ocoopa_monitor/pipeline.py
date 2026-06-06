@@ -7,7 +7,15 @@ from .analysis import AnalysisService
 from .config import Settings
 from .db import Database
 from .delivery import DeliveryClient
-from .fetchers import CPSCRecallFetcher, Fetcher, GenericRSSFetcher, GNewsFetcher, GoogleNewsRSSFetcher, SerpAPIFetcher
+from .fetchers import (
+    BraveSearchFetcher,
+    CPSCRecallFetcher,
+    Fetcher,
+    GenericRSSFetcher,
+    GNewsFetcher,
+    GoogleNewsRSSFetcher,
+    SerpAPIFetcher,
+)
 from .llm import RuleOnlyProvider, provider_from_settings
 from .models import Mention, RawItem, SourceConfig, utcnow
 from .normalize import canonicalize_url, content_hash, event_fingerprint, excerpt, find_keywords, normalize_text
@@ -31,6 +39,7 @@ class MonitorPipeline:
             "api": CPSCRecallFetcher(settings.request_timeout_seconds),
             "generic_rss": GenericRSSFetcher(settings.request_timeout_seconds),
             "serpapi": SerpAPIFetcher(settings.serpapi_api_key, settings.request_timeout_seconds),
+            "brave_search": BraveSearchFetcher(settings.brave_search_api_key, settings.request_timeout_seconds),
             "gnews": GNewsFetcher(settings.gnews_api_key, settings.request_timeout_seconds),
         }
 

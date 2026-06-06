@@ -12,7 +12,7 @@ from ocoopa_monitor.delivery import DeliveryClient, DingTalkRobotChannel
 from ocoopa_monitor.doctor import run_doctor
 from ocoopa_monitor.evidence import EvidenceChecker
 from ocoopa_monitor.fetchers.base import Fetcher
-from ocoopa_monitor.fetchers.search_api import SerpAPIFetcher
+from ocoopa_monitor.fetchers.search_api import BraveSearchFetcher, SerpAPIFetcher
 from ocoopa_monitor.keywords import DEFAULT_KEYWORDS
 from ocoopa_monitor.llm import DeepSeekProvider
 from ocoopa_monitor.models import RawItem, SourceConfig, utcnow
@@ -32,25 +32,26 @@ class StaticFetcher(Fetcher):
 
 
 def settings(db_path):
-        return Settings(
-            db_path=db_path,
-            alert_channel="generic",
-            alert_webhook_url="",
-            alert_webhook_secret="",
-            alert_at_mobiles="",
-            alert_rate_limit_per_minute=20,
-            llm_provider="rule",
-            llm_model="deepseek-v4-flash",
-            llm_api_key="",
-            llm_base_url="https://api.deepseek.com",
-            serpapi_api_key="",
-            gnews_api_key="",
-            high_lane_interval_minutes=15,
-            regular_lane_interval_minutes=60,
-            p0_health_threshold_minutes=120,
-            backfill_days=180,
-            request_timeout_seconds=1,
-        )
+    return Settings(
+        db_path=db_path,
+        alert_channel="generic",
+        alert_webhook_url="",
+        alert_webhook_secret="",
+        alert_at_mobiles="",
+        alert_rate_limit_per_minute=20,
+        llm_provider="rule",
+        llm_model="deepseek-v4-flash",
+        llm_api_key="",
+        llm_base_url="https://api.deepseek.com",
+        serpapi_api_key="",
+        brave_search_api_key="",
+        gnews_api_key="",
+        high_lane_interval_minutes=15,
+        regular_lane_interval_minutes=60,
+        p0_health_threshold_minutes=120,
+        backfill_days=180,
+        request_timeout_seconds=1,
+    )
 
 
 class CoreTests(unittest.TestCase):
@@ -329,6 +330,7 @@ class CoreTests(unittest.TestCase):
             llm_api_key="key",
             llm_base_url="https://api.deepseek.com",
             serpapi_api_key="serp",
+            brave_search_api_key="brave",
             gnews_api_key="gnews",
             high_lane_interval_minutes=base.high_lane_interval_minutes,
             regular_lane_interval_minutes=base.regular_lane_interval_minutes,
@@ -339,6 +341,41 @@ class CoreTests(unittest.TestCase):
         report = run_doctor(prod_settings, production=True)
         self.assertTrue(report.ok)
         self.assertEqual(report.errors, [])
+
+    def test_brave_search_uses_single_high_sensitivity_boolean_query(self):
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return (
+                    b'{"web":{"results":[{"title":"Ocoopa lawsuit",'
+                    b'"url":"https://example.com","description":"fire","age":"1 day ago"}]}}'
+                )
+
+        def fake_urlopen(request, timeout=20):
+            captured["url"] = request.full_url
+            captured["token"] = request.headers.get("X-subscription-token")
+            return FakeResponse()
+
+        source = SourceConfig(
+            "brave_high_search",
+            "search",
+            "P0",
+            "high",
+            "brave_search",
+            "https://api.search.brave.com/res/v1/web/search",
+        )
+        with patch("ocoopa_monitor.fetchers.search_api.urlopen", side_effect=fake_urlopen):
+            items = BraveSearchFetcher(api_key="secret").fetch(source, ["Ocoopa lawsuit"])
+        self.assertEqual(len(items), 1)
+        self.assertIn("Ocoopa+%28fire+OR+death+OR+lawsuit+OR+recall+OR+CPSC+OR+%22class+action%22%29", captured["url"])
+        self.assertEqual(captured["token"], "secret")
 
     def test_init_migrates_existing_sqlite_alert_schema(self):
         tmp = tempfile.NamedTemporaryFile(delete=True)
