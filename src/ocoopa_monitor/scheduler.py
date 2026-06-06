@@ -8,10 +8,14 @@ from typing import Optional
 
 from .config import Settings
 from .db import Database
+from .delivery import DeliveryClient
 from .pipeline import MonitorPipeline
 from .reports import DailyReportService
+from .source_health import SourceHealthMonitor
 
 LOGGER = logging.getLogger(__name__)
+
+HEALTH_CHECK_INTERVAL_MINUTES = 30
 
 
 @dataclass
@@ -19,6 +23,7 @@ class SchedulerState:
     last_high_run: Optional[datetime] = None
     last_regular_run: Optional[datetime] = None
     last_daily_report_date: Optional[str] = None
+    last_health_run: Optional[datetime] = None
 
 
 class SimpleScheduler:
@@ -26,6 +31,9 @@ class SimpleScheduler:
         self.db = db
         self.settings = settings
         self.state = SchedulerState()
+        self.delivery = DeliveryClient.from_settings(settings)
+        self.health = SourceHealthMonitor(db)
+        self._alerted_unhealthy: set = set()
 
     def run_forever(self, poll_seconds: int = 30) -> None:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -65,15 +73,46 @@ class SimpleScheduler:
             LOGGER.info("running regular lane")
             LOGGER.info("regular lane result=%s", pipeline.run_lane("regular"))
             self.state.last_regular_run = now
+        self._maybe_health_check(now)
         self._maybe_daily_report(now)
 
     def _maybe_daily_report(self, now: datetime) -> None:
         # Beijing 09:00 is 01:00 UTC. This keeps the scheduler dependency-free.
         report_date = now.date().isoformat()
         if now.hour == 1 and now.minute < 10 and self.state.last_daily_report_date != report_date:
-            LOGGER.info("generating daily report")
-            DailyReportService(self.db).generate("Asia/Shanghai")
+            LOGGER.info("generating + delivering daily report")
+            report = DailyReportService(self.db, self.delivery).generate("Asia/Shanghai")
+            LOGGER.info("daily report delivery_status=%s", report.get("delivery_status"))
             self.state.last_daily_report_date = report_date
+
+    def _maybe_health_check(self, now: datetime) -> None:
+        if not self._due(self.state.last_health_run, HEALTH_CHECK_INTERVAL_MINUTES, now):
+            return
+        self.state.last_health_run = now
+        unhealthy = {s["source_name"]: s for s in self.health.check()}
+        # Drop recovered sources so a future failure re-alerts.
+        self._alerted_unhealthy &= set(unhealthy)
+        # Only P0 sources page the team; P1 commercial-API quota failures are expected.
+        new_p0 = [
+            s
+            for name, s in unhealthy.items()
+            if name not in self._alerted_unhealthy and str(s.get("priority")) == "P0"
+        ]
+        if not new_p0:
+            return
+        for s in new_p0:
+            self._alerted_unhealthy.add(s["source_name"])
+        lines = ["### 【源健康告警】以下 P0 抓取源失联/连续失败，可能正在漏报：", ""]
+        for s in new_p0:
+            lines.append(
+                f"- {s['source_name']} status={s.get('health_status')} "
+                f"last_success={s.get('last_success_at')} failures={s.get('consecutive_failures')}"
+            )
+        try:
+            self.delivery.send_text("Ocoopa 源健康告警", "\n".join(lines), suppress_at=False)
+            LOGGER.warning("source-health alert sent for %s", [s["source_name"] for s in new_p0])
+        except Exception:
+            LOGGER.exception("failed to deliver source-health alert")
 
     @staticmethod
     def _due(last_run: Optional[datetime], interval_minutes: int, now: datetime) -> bool:

@@ -100,6 +100,35 @@ class Database:
             rows = conn.execute(sql, params).fetchall()
         return [Keyword(row["term"], row["category"], row["lane"], bool(row["active"])) for row in rows]
 
+    def list_keywords_all(self) -> List[Keyword]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT term, category, lane, active FROM keywords ORDER BY active DESC, lane, term"
+            ).fetchall()
+        return [Keyword(row["term"], row["category"], row["lane"], bool(row["active"])) for row in rows]
+
+    def upsert_keyword(self, term: str, category: str, lane: str, active: bool = True) -> None:
+        now = dt_to_str(utcnow())
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO keywords(term, category, lane, active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(term) DO UPDATE SET
+                    category=excluded.category, lane=excluded.lane,
+                    active=excluded.active, updated_at=excluded.updated_at
+                """,
+                (term, category, lane, int(active), now, now),
+            )
+
+    def set_keyword_active(self, term: str, active: bool) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "UPDATE keywords SET active=?, updated_at=? WHERE term=?",
+                (int(active), dt_to_str(utcnow()), term),
+            )
+            return cur.rowcount > 0
+
     def seed_sources(self, sources: Iterable[SourceConfig]) -> None:
         now = dt_to_str(utcnow())
         source_list = list(sources)
@@ -654,6 +683,35 @@ class PostgresDatabase:
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [Keyword(row["term"], row["category"], row["lane"], bool(row["active"])) for row in rows]
+
+    def list_keywords_all(self) -> List[Keyword]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT term, category, lane, active FROM keywords ORDER BY active DESC, lane, term"
+            ).fetchall()
+        return [Keyword(row["term"], row["category"], row["lane"], bool(row["active"])) for row in rows]
+
+    def upsert_keyword(self, term: str, category: str, lane: str, active: bool = True) -> None:
+        now = utcnow()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO keywords(term, category, lane, active, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT(term) DO UPDATE SET
+                    category=excluded.category, lane=excluded.lane,
+                    active=excluded.active, updated_at=excluded.updated_at
+                """,
+                (term, category, lane, active, now, now),
+            )
+
+    def set_keyword_active(self, term: str, active: bool) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "UPDATE keywords SET active=%s, updated_at=%s WHERE term=%s",
+                (active, utcnow(), term),
+            )
+            return cur.rowcount > 0
 
     def seed_sources(self, sources: Iterable[SourceConfig]) -> None:
         now = utcnow()

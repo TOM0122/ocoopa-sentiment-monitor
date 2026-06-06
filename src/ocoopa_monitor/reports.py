@@ -9,8 +9,9 @@ from .db import Database
 
 
 class DailyReportService:
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, delivery_client=None):
         self.db = db
+        self.delivery_client = delivery_client
 
     def generate(self, timezone_name: str = "Asia/Shanghai", date: Optional[str] = None) -> Dict[str, object]:
         tz = ZoneInfo(timezone_name)
@@ -63,10 +64,21 @@ class DailyReportService:
             "trend_vs_yesterday": {},
             "recommended_actions": recommended_actions,
             "generated_text_zh": text,
-            "delivery_status": "stored",
+            "delivery_status": self._deliver(report_date, text),
         }
         self.db.insert_daily_report(report)
         return report
+
+    def _deliver(self, report_date: str, text: str) -> str:
+        if not self.delivery_client:
+            return "stored"
+        try:
+            sent_to = self.delivery_client.send_text(
+                title=f"Ocoopa 舆情日报 {report_date}", text=text, suppress_at=True
+            )
+        except Exception:
+            return "failed"
+        return "delivered" if sent_to else "stored"
 
     @staticmethod
     def _recommended_actions(top_risks: List[Dict[str, object]]) -> List[str]:
