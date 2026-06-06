@@ -607,13 +607,22 @@ class CoreTests(unittest.TestCase):
 
     def test_high_lane_uses_only_free_sources(self):
         metered = {"brave_search", "serpapi", "gnews"}
+        free = {"rss", "api", "generic_rss"}
         high_methods = {s.method for s in DEFAULT_SOURCES if s.lane == "high"}
         self.assertFalse(high_methods & metered, f"high lane must be free-only, got {high_methods}")
-        self.assertTrue({"rss", "api"} >= high_methods)
+        self.assertTrue(free >= high_methods, f"unexpected high-lane method: {high_methods - free}")
         # Commercial APIs still present, but only on the hourly regular lane.
         regular_methods = {s.method for s in DEFAULT_SOURCES if s.lane == "regular"}
         self.assertIn("brave_search", regular_methods)
         self.assertIn("gnews", regular_methods)
+
+    def test_legal_lead_gen_source_is_configured(self):
+        legal = [s for s in DEFAULT_SOURCES if s.source_type == "legal"]
+        self.assertTrue(legal, "expected a legal lead-gen source for class-action recruitment")
+        src = legal[0]
+        self.assertEqual(src.lane, "high")
+        self.assertEqual(src.method, "generic_rss")
+        self.assertTrue(src.url.startswith("https://"))
 
     def test_seed_sources_deactivates_removed_source(self):
         tmp = tempfile.NamedTemporaryFile(delete=True)
