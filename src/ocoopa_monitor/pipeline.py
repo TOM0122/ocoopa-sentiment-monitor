@@ -69,6 +69,7 @@ class MonitorPipeline:
             "mentions_processed": 0,
             "alerts_created": 0,
             "alerts_suppressed_pre_bootstrap": 0,
+            "alerts_suppressed_muted": 0,
         }
         for source in self.db.get_sources(lane):
             stats["sources_attempted"] += 1
@@ -100,7 +101,10 @@ class MonitorPipeline:
                     if self._is_red_escalation(analysis) and not realtime_enabled:
                         stats["alerts_suppressed_pre_bootstrap"] += 1
                     if self._should_alert(stored, analysis, backfill, realtime_enabled):
-                        if self._create_alert(stored, analysis, incident_group_id):
+                        if self.db.is_incident_suppressed(stored.event_fingerprint):
+                            # Human marked this incident false-positive or muted.
+                            stats["alerts_suppressed_muted"] += 1
+                        elif self._create_alert(stored, analysis, incident_group_id):
                             stats["alerts_created"] += 1
                 self.db.record_source_success(source)
             except Exception as exc:

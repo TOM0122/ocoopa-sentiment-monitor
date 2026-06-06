@@ -67,7 +67,13 @@ python -m ocoopa_monitor.cli backfill --days 180          # 仅高敏车道回�
 python -m ocoopa_monitor.cli run-lane high                # 手动跑一次高敏车道
 python -m ocoopa_monitor.cli daily-report                 # 手动生成中文日报
 python -m ocoopa_monitor.cli health --json                # 抓取源健康检查
+python -m ocoopa_monitor.cli review list                  # 列出近期告警(供人工复核)
+python -m ocoopa_monitor.cli review mark <id> confirmed       # 标记已确认(继续告警)
+python -m ocoopa_monitor.cli review mark <id> false_positive  # 标记误报(该事件永久不再实时告警)
+python -m ocoopa_monitor.cli review mark <id> muted --days 7  # 静音 7 天(到期自动恢复;省略 --days = 无限期)
 ```
+
+> **人工反馈闭环(M2)**:`review mark` 作用于「事件」(同一 event_fingerprint),不是单条消息。标记 `false_positive`/`muted` 后,该事件的后续实时告警会被抑制(仍进历史库与日报);`confirmed` 不抑制、仅留痕。被抑制的告警在 run-lane 统计里计入 `alerts_suppressed_muted`。
 
 ## 5. 已知边界 / 待补
 
