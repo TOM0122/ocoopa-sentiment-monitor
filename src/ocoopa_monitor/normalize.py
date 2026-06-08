@@ -48,6 +48,29 @@ def event_fingerprint(title: str, raw_text: str, matched_keywords: Iterable[str]
     return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
 
+RISK_TOPIC_TAGS = {
+    "brand": ["ocoopa", "ocopa"],
+    "death": ["death", "died", "fatal", "wrongful death", "致死", "死亡", "重伤"],
+    "fire": ["fire", "burn", "overheat", "explode", "explosion", "起火", "爆炸", "烧伤"],
+    "lawsuit": ["lawsuit", "class action", "product liability", "settlement", "诉讼", "集体诉讼"],
+    "recall": ["recall", "cpsc", "召回"],
+}
+
+
+def topic_key(title: str, raw_text: str, matched_keywords: Iterable[str]) -> str:
+    """Coarse, stable signature clustering articles about the same KIND of event.
+
+    Used for cross-source alert cooldown: many outlets reporting the same
+    incident collapse to one topic, so the team is not paged once per outlet.
+    """
+    text = normalize_text(f"{title} {raw_text}").lower()
+    tags = [tag for tag, needles in RISK_TOPIC_TAGS.items() if any(n in text for n in needles)]
+    if tags:
+        return "|".join(sorted(set(tags)))
+    keys = sorted({kw.lower() for kw in matched_keywords})[:3]
+    return "kw:" + "|".join(keys) if keys else "untagged"
+
+
 def excerpt(text: str, limit: int = 600) -> str:
     clean = normalize_text(text)
     if len(clean) <= limit:

@@ -4,6 +4,22 @@ CREATE TABLE IF NOT EXISTS system_state (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS alert_topics (
+    topic_key TEXT PRIMARY KEY,
+    last_alert_at TIMESTAMPTZ,
+    alerted_source_types TEXT NOT NULL DEFAULT '[]',
+    risk_level_max TEXT NOT NULL DEFAULT 'green',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS alert_events (
+    event_key TEXT PRIMARY KEY,
+    first_alerted_at TIMESTAMPTZ NOT NULL,
+    last_alerted_at TIMESTAMPTZ NOT NULL,
+    alert_count INTEGER NOT NULL DEFAULT 1,
+    seen_source_types JSONB NOT NULL DEFAULT '[]'::jsonb
+);
+
 CREATE TABLE IF NOT EXISTS keywords (
     id BIGSERIAL PRIMARY KEY,
     term TEXT NOT NULL UNIQUE,

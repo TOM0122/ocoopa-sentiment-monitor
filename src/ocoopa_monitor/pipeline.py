@@ -5,7 +5,7 @@ from typing import Dict, Iterable, List, Optional
 
 from .analysis import AnalysisService
 from .config import Settings
-from .db import Database
+from .db import Database, max_risk
 from .delivery import DeliveryClient
 from .fetchers import (
     BraveSearchFetcher,
@@ -18,7 +18,15 @@ from .fetchers import (
 )
 from .llm import RuleOnlyProvider, provider_from_settings
 from .models import Mention, RawItem, SourceConfig, utcnow
-from .normalize import canonicalize_url, content_hash, event_fingerprint, excerpt, find_keywords, normalize_text
+from .normalize import (
+    canonicalize_url,
+    content_hash,
+    event_fingerprint,
+    excerpt,
+    find_keywords,
+    normalize_text,
+    topic_key,
+)
 
 
 class MonitorPipeline:
@@ -70,6 +78,7 @@ class MonitorPipeline:
             "alerts_created": 0,
             "alerts_suppressed_pre_bootstrap": 0,
             "alerts_suppressed_muted": 0,
+            "alerts_suppressed_cooldown": 0,
         }
         for source in self.db.get_sources(lane):
             stats["sources_attempted"] += 1
@@ -104,6 +113,10 @@ class MonitorPipeline:
                         if self.db.is_incident_suppressed(stored.event_fingerprint):
                             # Human marked this incident false-positive or muted.
                             stats["alerts_suppressed_muted"] += 1
+                        elif not self._topic_allows_alert(stored, analysis):
+                            # Same event already paged within the cooldown window
+                            # (cross-source de-dup): suppress the duplicate page.
+                            stats["alerts_suppressed_cooldown"] += 1
                         elif self._create_alert(stored, analysis, incident_group_id):
                             stats["alerts_created"] += 1
                 self.db.record_source_success(source)
@@ -194,6 +207,25 @@ class MonitorPipeline:
             return False
         return MonitorPipeline._is_red_escalation(analysis)
 
+    def _topic_allows_alert(self, mention: Mention, analysis) -> bool:
+        """Cross-source de-dup: one page per event topic per cooldown window.
+
+        Breaks through the cooldown when a new source TYPE first appears on the
+        topic (first CPSC / legal / mainstream-media report) or when risk
+        escalates — preserving the lifeline 'media follow-up / CPSC' signals.
+        """
+        topic = topic_key(mention.title, mention.raw_text, mention.matched_keywords)
+        state = self.db.get_topic_alert(topic)
+        if state is None:
+            return True
+        last = state["last_alert_at"]
+        cooldown = timedelta(hours=self.settings.alert_cooldown_hours)
+        if last is None or (utcnow() - _aware(last)) > cooldown:
+            return True
+        if mention.source_type not in state["alerted_source_types"]:
+            return True
+        return max_risk(analysis.risk_level, state["risk_level_max"]) != state["risk_level_max"]
+
     def _create_alert(self, mention: Mention, analysis, incident_group_id: int) -> bool:
         if mention.id is None:
             return False
@@ -226,6 +258,12 @@ class MonitorPipeline:
             delivery_latency_seconds=delivery_latency_seconds,
             sent_to=sent_to,
             sent_at=sent_at,
+        )
+        self.db.record_topic_alert(
+            topic_key(mention.title, mention.raw_text, mention.matched_keywords),
+            mention.source_type,
+            analysis.risk_level,
+            sent_at,
         )
         return True
 
