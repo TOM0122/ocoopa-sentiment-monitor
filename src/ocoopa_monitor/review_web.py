@@ -84,6 +84,7 @@ def apply_mark(
     updated = db.review_incident(fingerprint, status, muted_until)
     if not updated:
         return False, "未找到对应事件"
+    db.ack_alert(alert_id)  # reviewing counts as acknowledging -> stops escalation
     return True, f"#{alert_id} 已标记为 {status}"
 
 

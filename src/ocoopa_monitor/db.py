@@ -587,6 +587,33 @@ class Database:
                 (topic_key, dt_to_str(now), json.dumps(sorted(types)), rmax, dt_to_str(utcnow())),
             )
 
+    # --- Tier 2 red-alert ack / unacked escalation ---
+    def ack_alert(self, alert_id: int) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "UPDATE alerts SET ack_status='acked' WHERE id=? AND ack_status!='acked'",
+                (alert_id,),
+            )
+            return cur.rowcount > 0
+
+    def mark_alert_escalated(self, alert_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE alerts SET ack_status='escalated' WHERE id=?", (alert_id,))
+
+    def pending_red_alerts_older_than(self, cutoff: datetime) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.id AS alert_id, a.sent_at, m.title, m.source_url
+                FROM alerts a JOIN mentions m ON m.id=a.mention_id
+                WHERE a.risk_level='red' AND a.ack_status='pending' AND a.sent_at IS NOT NULL
+                      AND a.sent_at < ?
+                ORDER BY a.id
+                """,
+                (dt_to_str(cutoff),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def fetch_mentions_for_day(self, date_prefix: str) -> List[sqlite3.Row]:
         with self.connect() as conn:
             return conn.execute(
@@ -1205,6 +1232,33 @@ class PostgresDatabase:
                 """,
                 (topic_key, now, json.dumps(sorted(types)), rmax, utcnow()),
             )
+
+    # --- Tier 2 red-alert ack / unacked escalation ---
+    def ack_alert(self, alert_id: int) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "UPDATE alerts SET ack_status='acked' WHERE id=%s AND ack_status<>'acked'",
+                (alert_id,),
+            )
+            return cur.rowcount > 0
+
+    def mark_alert_escalated(self, alert_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE alerts SET ack_status='escalated' WHERE id=%s", (alert_id,))
+
+    def pending_red_alerts_older_than(self, cutoff: datetime) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.id AS alert_id, a.sent_at, m.title, m.source_url
+                FROM alerts a JOIN mentions m ON m.id=a.mention_id
+                WHERE a.risk_level='red' AND a.ack_status='pending' AND a.sent_at IS NOT NULL
+                      AND a.sent_at < %s
+                ORDER BY a.id
+                """,
+                (cutoff,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def fetch_mentions_between(self, start_at: datetime, end_at: datetime) -> List[Dict[str, Any]]:
         with self.connect() as conn:

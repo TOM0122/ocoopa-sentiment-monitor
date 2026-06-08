@@ -66,6 +66,7 @@ def settings(db_path):
         alert_at_mobiles="",
         alert_rate_limit_per_minute=20,
         alert_cooldown_hours=6,
+        alert_ack_timeout_minutes=30,
         review_token="",
         llm_provider="rule",
         llm_model="deepseek-v4-flash",
@@ -422,6 +423,7 @@ class CoreTests(unittest.TestCase):
             alert_at_mobiles="13800000000",
             alert_rate_limit_per_minute=20,
             alert_cooldown_hours=6,
+            alert_ack_timeout_minutes=30,
             review_token="",
             llm_provider="deepseek",
             llm_model="deepseek-v4-flash",
@@ -453,6 +455,7 @@ class CoreTests(unittest.TestCase):
             alert_at_mobiles=base.alert_at_mobiles,
             alert_rate_limit_per_minute=base.alert_rate_limit_per_minute,
             alert_cooldown_hours=base.alert_cooldown_hours,
+            alert_ack_timeout_minutes=base.alert_ack_timeout_minutes,
             review_token=base.review_token,
             llm_provider=base.llm_provider,
             llm_model=base.llm_model,
@@ -810,6 +813,53 @@ class CoreTests(unittest.TestCase):
         html = render_review_page(db.list_recent_alerts(10), token="t")
         self.assertIn("/review/mark", html)
         self.assertIn("误报", html)
+
+    def _make_aged_red_alert(self, db, tmp):
+        self._run_one(db, tmp, self._red_news("https://a.com/1", "Ocoopa death lawsuit filed"))
+        aid = db.list_recent_alerts(1)[0]["alert_id"]
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE alerts SET sent_at=? WHERE id=?",
+                (dt_to_str(utcnow() - timedelta(hours=1)), aid),
+            )
+        return aid
+
+    def test_unacked_red_alert_escalates_once(self):
+        db, tmp = self.make_db()
+        aid = self._make_aged_red_alert(db, tmp)
+        captured = []
+
+        class FakeDelivery:
+            def send_text(self, title, text, suppress_at=True):
+                captured.append(text)
+                return "x"
+
+        sch = SimpleScheduler(db, settings(tmp.name))
+        sch.delivery = FakeDelivery()
+        sch._maybe_escalate_unacked(utcnow())
+        self.assertEqual(len(captured), 1)
+        self.assertIn(str(aid), captured[0])
+        # Already escalated -> not paged again.
+        sch._maybe_escalate_unacked(utcnow())
+        self.assertEqual(len(captured), 1)
+
+    def test_review_ack_prevents_escalation(self):
+        from ocoopa_monitor.review_web import apply_mark
+
+        db, tmp = self.make_db()
+        aid = self._make_aged_red_alert(db, tmp)
+        self.assertTrue(apply_mark(db, aid, "confirmed")[0])  # ack via review
+        captured = []
+
+        class FakeDelivery:
+            def send_text(self, title, text, suppress_at=True):
+                captured.append(text)
+                return "x"
+
+        sch = SimpleScheduler(db, settings(tmp.name))
+        sch.delivery = FakeDelivery()
+        sch._maybe_escalate_unacked(utcnow())
+        self.assertEqual(len(captured), 0)
 
 
 if __name__ == "__main__":

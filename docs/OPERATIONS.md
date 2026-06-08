@@ -55,6 +55,7 @@ scheduler 启动时:若数据库未 bootstrap → 自动跑 180 天静默 backfi
 - **每日 09:00(北京时间)** 生成并**推送**中文日报到钉钉(routine 推送,不 @ 手机号)。
 - **源健康告警**:scheduler 每 30 分钟检查抓取源;**P0 源**(Google News RSS / CPSC / AboutLawsuits)失联或连续失败时推钉钉并 @ 负责人(P1 商业 API 配额失败属预期,不告警)。同一源失败只告警一次,恢复后再失败会重新告警。
 - **跨源告警去重(防刷屏)**:同一事件话题(如 ocoopa+死亡+诉讼)被多家媒体报道时,冷却窗(默认 6 小时,`OCOOPA_ALERT_COOLDOWN_HOURS`)内只推一条红色;但**新的来源类型首次出现**(如首条 CPSC、首个法律站、首家主流媒体)或风险升级会**突破冷却**照常告警。被去重的仍入库与日报,统计计入 `alerts_suppressed_cooldown`。
+- **红色未处理升级**:红色告警若超过 `OCOOPA_ALERT_ACK_TIMEOUT_MINUTES`(默认 30 分钟)无人复核,scheduler 会**再 @ 一次负责人**(只升级一次,避免刷屏)。用 CLI `review mark` 或 web 复核页处理任一告警即视为已确认(ack),不再升级。
 
 ### 配额策略(免费档)
 

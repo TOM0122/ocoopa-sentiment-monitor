@@ -139,6 +139,8 @@ def main() -> None:
         if args.status == "muted" and args.days:
             muted_until = utcnow() + timedelta(days=args.days)
         updated = db.review_incident(fingerprint, args.status, muted_until)
+        if updated:
+            db.ack_alert(args.alert_id)
         print_json(
             {
                 "alert_id": args.alert_id,
