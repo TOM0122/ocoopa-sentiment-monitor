@@ -83,6 +83,18 @@ python -m ocoopa_monitor.cli keyword enable "<词>"            # 重新启用
 
 > **人工反馈闭环(M2)**:`review mark` 作用于「事件」(同一 event_fingerprint),不是单条消息。标记 `false_positive`/`muted` 后,该事件的后续实时告警会被抑制(仍进历史库与日报);`confirmed` 不抑制、仅留痕。被抑制的告警在 run-lane 统计里计入 `alerts_suppressed_muted`。
 
+### Web 复核页(给非技术同事,无需终端)
+
+除 CLI 外,FastAPI 应用提供一个网页复核入口:`GET /review` 列出近期告警,每条带「确认 / 误报 / 静音7天」按钮,点一下即标记(等价于 `review mark`)。
+
+- **如何在 Railway 跑**:复核页由 FastAPI 提供,与 scheduler 是**两个进程**。新增一个 Railway 服务,指向同一个 Postgres(`OCOOPA_DB_URL=${{Postgres.DATABASE_URL}}`),启动命令:
+  ```
+  uvicorn ocoopa_monitor.api:app --host 0.0.0.0 --port $PORT
+  ```
+  (镜像已含 `[api]` 依赖。)
+- **必须设 `OCOOPA_REVIEW_TOKEN`**:该页是公网可变更端点,设置 token 后访问需带 `?token=<你的token>`(`/review?token=xxx`),未配置则不鉴权(仅限内网/调试)。
+- 把 `https://<服务域名>/review?token=xxx` 发给负责复核的同事收藏即可。
+
 ## 5. 已知边界 / 待补
 
 - **集体诉讼招募源未接**:律师导流站白名单待法务批准后加入(免费 RSS/白名单抓取),目前该信号只能经新闻/搜索间接捕捉。

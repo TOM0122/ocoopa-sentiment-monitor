@@ -66,6 +66,7 @@ def settings(db_path):
         alert_at_mobiles="",
         alert_rate_limit_per_minute=20,
         alert_cooldown_hours=6,
+        review_token="",
         llm_provider="rule",
         llm_model="deepseek-v4-flash",
         llm_api_key="",
@@ -421,6 +422,7 @@ class CoreTests(unittest.TestCase):
             alert_at_mobiles="13800000000",
             alert_rate_limit_per_minute=20,
             alert_cooldown_hours=6,
+            review_token="",
             llm_provider="deepseek",
             llm_model="deepseek-v4-flash",
             llm_api_key="key",
@@ -451,6 +453,7 @@ class CoreTests(unittest.TestCase):
             alert_at_mobiles=base.alert_at_mobiles,
             alert_rate_limit_per_minute=base.alert_rate_limit_per_minute,
             alert_cooldown_hours=base.alert_cooldown_hours,
+            review_token=base.review_token,
             llm_provider=base.llm_provider,
             llm_model=base.llm_model,
             llm_api_key=base.llm_api_key,
@@ -784,6 +787,29 @@ class CoreTests(unittest.TestCase):
             db, tmp, self._red_news("https://cpsc.gov/x", "Ocoopa death lawsuit official", source_type="cpsc")
         )
         self.assertEqual(r["alerts_created"], 1)
+
+    def test_review_web_token_gate(self):
+        from ocoopa_monitor.review_web import token_ok
+
+        self.assertTrue(token_ok("", "anything"))  # open when unset
+        self.assertTrue(token_ok("s3cret", "s3cret"))
+        self.assertFalse(token_ok("s3cret", "wrong"))
+        self.assertFalse(token_ok("s3cret", ""))
+
+    def test_review_web_apply_mark_and_render(self):
+        from ocoopa_monitor.review_web import apply_mark, render_review_page
+
+        db, tmp = self.make_db()
+        self._run_one(db, tmp, self._red_news("https://a.com/1", "Ocoopa death lawsuit filed"))
+        aid = db.list_recent_alerts(1)[0]["alert_id"]
+        ok, _ = apply_mark(db, aid, "false_positive")
+        self.assertTrue(ok)
+        self.assertTrue(db.is_incident_suppressed(db.get_fingerprint_by_alert(aid)))
+        self.assertFalse(apply_mark(db, aid, "bogus")[0])
+        self.assertFalse(apply_mark(db, 999999, "muted")[0])
+        html = render_review_page(db.list_recent_alerts(10), token="t")
+        self.assertIn("/review/mark", html)
+        self.assertIn("误报", html)
 
 
 if __name__ == "__main__":
