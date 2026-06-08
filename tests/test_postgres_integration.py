@@ -83,6 +83,22 @@ class PostgresIntegrationTests(unittest.TestCase):
         self.assertGreater(alert_id, 0)
         self.assertTrue(db.alert_exists(f"pg-smoke-fingerprint-{suffix}:red"))
 
+    def test_init_adds_missing_columns_to_existing_tables(self):
+        # CREATE TABLE IF NOT EXISTS never alters an existing table; init() must
+        # apply idempotent column migrations (regression: g.muted_until missing).
+        db = PostgresDatabase(os.environ["OCOOPA_TEST_POSTGRES_URL"])
+        db.init()
+        with db.connect() as conn:
+            conn.execute("ALTER TABLE incident_groups DROP COLUMN IF EXISTS muted_until")
+        db.init()
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='incident_groups' AND column_name='muted_until'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        db.list_recent_alerts(1)  # the review query that failed in production now works
+
 
 if __name__ == "__main__":
     unittest.main()
