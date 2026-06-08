@@ -96,6 +96,16 @@ python -m ocoopa_monitor.cli keyword enable "<词>"            # 重新启用
 - **必须设 `OCOOPA_REVIEW_TOKEN`**:该页是公网可变更端点,设置 token 后访问需带 `?token=<你的token>`(`/review?token=xxx`),未配置则不鉴权(仅限内网/调试)。
 - 把 `https://<服务域名>/review?token=xxx` 发给负责复核的同事收藏即可。
 
+### 运营控制台(看板 / 检索 / 导出)
+
+同一个 web 服务还提供给法务/PR/高层看的只读控制台(同样用 `OCOOPA_REVIEW_TOKEN` 鉴权):
+
+- **看板** `GET /dashboard?token=xxx&days=30`:近 N 天提及总数、实时告警数、风险/情感/来源分布、近期红/黄风险列表(带原文链接)。
+- **检索** `GET /console/search?token=xxx&q=<关键词>&risk=<red|yellow|green>&days=30`:按关键词/风险等级过滤,看标题、来源、摘要、链接。
+- **导出 CSV** `GET /console/export.csv?token=xxx&days=30`:导出该时间窗内全部提及(含风险/情感/分类/摘要/证据状态),给法务做可追溯报告。
+
+> 控制台是只读聚合,不改数据;反馈仍在 `/review` 或 CLI 进行。`days` 默认 30,可调。
+
 ## 5. 已知边界 / 待补
 
 - **集体诉讼招募源未接**:律师导流站白名单待法务批准后加入(免费 RSS/白名单抓取),目前该信号只能经新闻/搜索间接捕捉。

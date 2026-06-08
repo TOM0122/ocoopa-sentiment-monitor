@@ -861,6 +861,34 @@ class CoreTests(unittest.TestCase):
         sch._maybe_escalate_unacked(utcnow())
         self.assertEqual(len(captured), 0)
 
+    def test_console_dashboard_search_export(self):
+        from ocoopa_monitor.console_web import (
+            compute_dashboard,
+            filter_rows,
+            render_dashboard,
+            render_search,
+            rows_to_csv,
+        )
+
+        db, tmp = self.make_db()
+        self._run_one(db, tmp, self._red_news("https://a.com/1", "Ocoopa death lawsuit filed"))
+        rows = db.fetch_mentions_between(utcnow() - timedelta(days=1), utcnow() + timedelta(days=1))
+        stats = compute_dashboard(rows, db.list_recent_alerts(100))
+        self.assertGreaterEqual(stats["total"], 1)
+        self.assertIn("red", stats["risk"])
+        self.assertTrue(stats["top"])
+        # search filtering
+        self.assertTrue(filter_rows(rows, q="ocoopa"))
+        self.assertEqual(filter_rows(rows, q="zzz-no-match"), [])
+        self.assertTrue(all(r["risk_level"] == "red" for r in filter_rows(rows, risk="red")))
+        # CSV export
+        csv_text = rows_to_csv(rows)
+        self.assertIn("source_url", csv_text.splitlines()[0])
+        self.assertIn("https://a.com/1", csv_text)
+        # HTML renders
+        self.assertIn("舆情看板", render_dashboard(stats, 30, "t"))
+        self.assertIn("检索", render_search(filter_rows(rows), "", "", 30, "t"))
+
 
 if __name__ == "__main__":
     unittest.main()
