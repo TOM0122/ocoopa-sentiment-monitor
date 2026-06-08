@@ -707,6 +707,13 @@ class PostgresDatabase:
         finally:
             conn.close()
 
+    # Columns added to tables after their initial creation. CREATE TABLE IF NOT
+    # EXISTS never alters an existing table, so apply these idempotently on init.
+    _PG_COLUMN_MIGRATIONS = (
+        "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS delivery_latency_seconds INTEGER",
+        "ALTER TABLE incident_groups ADD COLUMN IF NOT EXISTS muted_until TIMESTAMPTZ",
+    )
+
     def init(self) -> None:
         migration = _postgres_migration_sql()
         with self.connect() as conn:
@@ -714,6 +721,8 @@ class PostgresDatabase:
                 statement = statement.strip()
                 if statement:
                     conn.execute(statement)
+            for statement in self._PG_COLUMN_MIGRATIONS:
+                conn.execute(statement)
 
     def seed_keywords(self, keywords: Iterable[Keyword]) -> None:
         now = utcnow()
