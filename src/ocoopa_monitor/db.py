@@ -553,6 +553,40 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    # --- Tier 2 cross-source alert cooldown ---
+    def get_topic_alert(self, topic_key: str) -> Optional[Dict[str, Any]]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT last_alert_at, alerted_source_types, risk_level_max FROM alert_topics WHERE topic_key=?",
+                (topic_key,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "last_alert_at": str_to_dt(row["last_alert_at"]),
+            "alerted_source_types": set(json.loads(row["alerted_source_types"] or "[]")),
+            "risk_level_max": row["risk_level_max"],
+        }
+
+    def record_topic_alert(self, topic_key: str, source_type: str, risk_level: str, now: datetime) -> None:
+        existing = self.get_topic_alert(topic_key)
+        types = existing["alerted_source_types"] if existing else set()
+        types.add(source_type)
+        rmax = max_risk(existing["risk_level_max"], risk_level) if existing else risk_level
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO alert_topics(topic_key, last_alert_at, alerted_source_types, risk_level_max, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(topic_key) DO UPDATE SET
+                    last_alert_at=excluded.last_alert_at,
+                    alerted_source_types=excluded.alerted_source_types,
+                    risk_level_max=excluded.risk_level_max,
+                    updated_at=excluded.updated_at
+                """,
+                (topic_key, dt_to_str(now), json.dumps(sorted(types)), rmax, dt_to_str(utcnow())),
+            )
+
     def fetch_mentions_for_day(self, date_prefix: str) -> List[sqlite3.Row]:
         with self.connect() as conn:
             return conn.execute(
@@ -1138,6 +1172,40 @@ class PostgresDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    # --- Tier 2 cross-source alert cooldown ---
+    def get_topic_alert(self, topic_key: str) -> Optional[Dict[str, Any]]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT last_alert_at, alerted_source_types, risk_level_max FROM alert_topics WHERE topic_key=%s",
+                (topic_key,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "last_alert_at": row["last_alert_at"],
+            "alerted_source_types": set(json.loads(row["alerted_source_types"] or "[]")),
+            "risk_level_max": row["risk_level_max"],
+        }
+
+    def record_topic_alert(self, topic_key: str, source_type: str, risk_level: str, now: datetime) -> None:
+        existing = self.get_topic_alert(topic_key)
+        types = existing["alerted_source_types"] if existing else set()
+        types.add(source_type)
+        rmax = max_risk(existing["risk_level_max"], risk_level) if existing else risk_level
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO alert_topics(topic_key, last_alert_at, alerted_source_types, risk_level_max, updated_at)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT(topic_key) DO UPDATE SET
+                    last_alert_at=excluded.last_alert_at,
+                    alerted_source_types=excluded.alerted_source_types,
+                    risk_level_max=excluded.risk_level_max,
+                    updated_at=excluded.updated_at
+                """,
+                (topic_key, now, json.dumps(sorted(types)), rmax, utcnow()),
+            )
+
     def fetch_mentions_between(self, start_at: datetime, end_at: datetime) -> List[Dict[str, Any]]:
         with self.connect() as conn:
             return conn.execute(
@@ -1268,6 +1336,22 @@ CREATE TABLE IF NOT EXISTS system_state (
     key TEXT PRIMARY KEY,
     value TEXT,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS alert_topics (
+    topic_key TEXT PRIMARY KEY,
+    last_alert_at TEXT,
+    alerted_source_types TEXT NOT NULL DEFAULT '[]',
+    risk_level_max TEXT NOT NULL DEFAULT 'green',
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS alert_events (
+    event_key TEXT PRIMARY KEY,
+    first_alerted_at TEXT NOT NULL,
+    last_alerted_at TEXT NOT NULL,
+    alert_count INTEGER NOT NULL DEFAULT 1,
+    seen_source_types TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS keywords (

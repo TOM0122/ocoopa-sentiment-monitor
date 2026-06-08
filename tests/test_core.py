@@ -65,6 +65,7 @@ def settings(db_path):
         alert_webhook_secret="",
         alert_at_mobiles="",
         alert_rate_limit_per_minute=20,
+        alert_cooldown_hours=6,
         llm_provider="rule",
         llm_model="deepseek-v4-flash",
         llm_api_key="",
@@ -419,6 +420,7 @@ class CoreTests(unittest.TestCase):
             alert_webhook_secret="secret",
             alert_at_mobiles="13800000000",
             alert_rate_limit_per_minute=20,
+            alert_cooldown_hours=6,
             llm_provider="deepseek",
             llm_model="deepseek-v4-flash",
             llm_api_key="key",
@@ -448,6 +450,7 @@ class CoreTests(unittest.TestCase):
             alert_webhook_secret=base.alert_webhook_secret,
             alert_at_mobiles=base.alert_at_mobiles,
             alert_rate_limit_per_minute=base.alert_rate_limit_per_minute,
+            alert_cooldown_hours=base.alert_cooldown_hours,
             llm_provider=base.llm_provider,
             llm_model=base.llm_model,
             llm_api_key=base.llm_api_key,
@@ -740,6 +743,47 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("Ocoopa HR-12X fire", {k.term for k in db.get_keywords("high")})
         self.assertIn("Ocoopa HR-12X fire", {k.term for k in db.list_keywords_all()})
         self.assertFalse(db.set_keyword_active("does-not-exist", True))
+
+    def _red_news(self, url: str, title: str, source_type: str = "news") -> RawItem:
+        return RawItem(
+            source_type=source_type,
+            source_name="test_high",
+            source_url=url,
+            title=title,
+            raw_text=f"{title} — Ocoopa wrongful death lawsuit after a hand warmer fire.",
+            published_at=utcnow(),
+        )
+
+    def _run_one(self, db, tmp, item):
+        return MonitorPipeline(
+            db, settings(tmp.name), fetchers={"static": StaticFetcher([item])}
+        ).run_lane("high")
+
+    def test_topic_key_clusters_same_event_across_outlets(self):
+        from ocoopa_monitor.normalize import topic_key
+
+        a = topic_key("Ocoopa death lawsuit filed", "wrongful death after fire", ["Ocoopa"])
+        b = topic_key("Family sues Ocoopa after fatal fire", "lawsuit and death", ["Ocoopa"])
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, topic_key("Ocoopa recall notice", "cpsc recall", ["Ocoopa recall"]))
+
+    def test_cross_source_cooldown_dedups_same_topic(self):
+        db, tmp = self.make_db()
+        r1 = self._run_one(db, tmp, self._red_news("https://a.com/1", "Ocoopa death lawsuit filed in California"))
+        self.assertEqual(r1["alerts_created"], 1)
+        # Different outlet + different article, SAME topic + same source_type -> suppressed.
+        r2 = self._run_one(db, tmp, self._red_news("https://b.com/2", "Family sues Ocoopa after fatal fire"))
+        self.assertEqual(r2["alerts_created"], 0)
+        self.assertEqual(r2["alerts_suppressed_cooldown"], 1)
+
+    def test_new_source_type_breaks_through_cooldown(self):
+        db, tmp = self.make_db()
+        self._run_one(db, tmp, self._red_news("https://a.com/1", "Ocoopa death lawsuit filed"))
+        # Same topic, but a NEW source type (CPSC) must break through the cooldown.
+        r = self._run_one(
+            db, tmp, self._red_news("https://cpsc.gov/x", "Ocoopa death lawsuit official", source_type="cpsc")
+        )
+        self.assertEqual(r["alerts_created"], 1)
 
 
 if __name__ == "__main__":
