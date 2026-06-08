@@ -35,6 +35,7 @@ def settings(db_path):
         alert_at_mobiles="",
         alert_rate_limit_per_minute=20,
         alert_cooldown_hours=6,
+        alert_ack_timeout_minutes=30,
         review_token="",
         llm_provider="rule",
         llm_model="deepseek-v4-flash",

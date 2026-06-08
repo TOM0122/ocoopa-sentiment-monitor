@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .config import Settings
@@ -74,7 +74,33 @@ class SimpleScheduler:
             LOGGER.info("regular lane result=%s", pipeline.run_lane("regular"))
             self.state.last_regular_run = now
         self._maybe_health_check(now)
+        self._maybe_escalate_unacked(now)
         self._maybe_daily_report(now)
+
+    def _maybe_escalate_unacked(self, now: datetime) -> None:
+        """Re-page the on-call once for any red alert left unacked past the timeout.
+
+        Reviewing an alert (CLI or web) acks it, so a handled alert never
+        escalates. Escalated alerts are marked so they are not re-paged again.
+        """
+        cutoff = now - timedelta(minutes=self.settings.alert_ack_timeout_minutes)
+        pending = self.db.pending_red_alerts_older_than(cutoff)
+        if not pending:
+            return
+        lines = [
+            f"### 【红色告警未处理】以下红色告警超过 {self.settings.alert_ack_timeout_minutes} 分钟无人复核：",
+            "",
+        ]
+        for a in pending:
+            lines.append(f"- #{a['alert_id']} {a.get('title')}\n  {a.get('source_url')}")
+        try:
+            self.delivery.send_text("Ocoopa 红色告警未处理升级", "\n".join(lines), suppress_at=False)
+        except Exception:
+            LOGGER.exception("failed to deliver escalation; will retry next tick")
+            return
+        for a in pending:
+            self.db.mark_alert_escalated(a["alert_id"])
+        LOGGER.warning("escalated unacked red alerts: %s", [a["alert_id"] for a in pending])
 
     def _maybe_daily_report(self, now: datetime) -> None:
         # Beijing 09:00 is 01:00 UTC. This keeps the scheduler dependency-free.
