@@ -15,6 +15,7 @@ class Settings:
     alert_at_mobiles: str
     alert_rate_limit_per_minute: int
     alert_cooldown_hours: int
+    review_token: str
     llm_provider: str
     llm_model: str
     llm_api_key: str
@@ -39,6 +40,7 @@ def load_settings() -> Settings:
         alert_at_mobiles=os.getenv("OCOOPA_ALERT_AT_MOBILES", ""),
         alert_rate_limit_per_minute=int(os.getenv("OCOOPA_ALERT_RATE_LIMIT_PER_MINUTE", "20")),
         alert_cooldown_hours=int(os.getenv("OCOOPA_ALERT_COOLDOWN_HOURS", "6")),
+        review_token=os.getenv("OCOOPA_REVIEW_TOKEN", ""),
         llm_provider=os.getenv("OCOOPA_LLM_PROVIDER", "rule").lower(),
         llm_model=os.getenv("OCOOPA_LLM_MODEL", "deepseek-v4-flash"),
         llm_api_key=os.getenv("OCOOPA_LLM_API_KEY", ""),
