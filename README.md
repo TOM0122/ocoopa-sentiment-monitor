@@ -1,20 +1,20 @@
 # Ocoopa Public Opinion Monitor
 
-M1 implementation for an internal Ocoopa public-opinion and PR risk monitoring agent.
+Internal Ocoopa public-opinion and PR risk monitoring agent. **In production (Railway) — supervised trial stage.**
 
-The core pipeline is intentionally runnable with only the Python standard library:
+> New here? Read [docs/OVERVIEW.md](docs/OVERVIEW.md) (non-technical) and [docs/OPERATIONS.md](docs/OPERATIONS.md) (deploy / run / review / console).
 
-- keyword hot-load from the database
-- high-sensitivity and regular ingestion lanes
-- RSS and CPSC recall API fetchers
-- source health monitoring and fetcher isolation
-- conservative URL/content/event dedupe
-- rule-first analysis with pluggable LLM provider interface
-- evidence grounding for quotes and high-risk claims
-- backfill mode that writes history without real-time alerts
-- daily Chinese report generation
+The core pipeline runs on the Python standard library; the web console/review UI needs the optional FastAPI extra.
 
-Optional FastAPI dependencies are listed in `requirements.txt`; the command-line workflow and tests do not require them.
+- keyword hot-load + `keyword` CLI for live edits (law-firm names, case numbers, models)
+- high-sensitivity (15 min, free RSS + CPSC + legal lead-gen) and regular (hourly, commercial APIs) lanes
+- RSS, CPSC recall API, and generic-RSS (AboutLawsuits legal) fetchers; source-health monitoring + fetcher isolation
+- conservative URL/content/event dedupe + cross-source topic cooldown (one page per event)
+- rule-first analysis with a pluggable LLM provider (DeepSeek in prod), cross-lingual evidence grounding
+- deterministic cold-start: silent backfill before real-time alerts (no alert storm on first deploy)
+- DingTalk delivery of red alerts, the daily Chinese report, source-health pages, and unacked-alert escalation
+- human feedback loop (confirm / false-positive / mute) via the `review` CLI and the web review page
+- read-only operations console: dashboard, search, CSV export
 
 ## Quick Start
 
@@ -71,7 +71,7 @@ Backfilled mentions are stored with `backfill=true`, analyzed, and grouped into 
 
 ## Delivery
 
-Alerts and reports are always stored in the database.
+Alerts and reports are always stored in the database, and (when a channel is configured) also pushed: red alerts in real time, the daily report each morning, source-health pages, and unacked-red-alert escalation.
 
 Use DingTalk custom robot delivery:
 
@@ -115,13 +115,13 @@ export OCOOPA_BRAVE_SEARCH_API_KEY="..."
 export OCOOPA_GNEWS_API_KEY="..."
 ```
 
-The high-sensitivity lane uses a single Boolean query per commercial source to control cost:
+To stay inside free quotas, commercial APIs run on the **regular (hourly) lane**, not the 15-min high-sensitivity lane (which uses only free, unmetered sources). Each commercial source issues a single Boolean query per run to control cost:
 
 ```text
 Ocoopa (fire OR death OR lawsuit OR recall OR CPSC OR "class action")
 ```
 
-If SerpAPI is not available, use Brave Search API as the preferred drop-in search replacement by setting `OCOOPA_BRAVE_SEARCH_API_KEY`. SerpAPI can remain empty.
+Brave Search is the recommended commercial source; SerpAPI's free tier is too small and is disabled by default. See cost/quota guidance in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Docker Deployment
 
@@ -174,12 +174,16 @@ Do not commit `.env`, API keys, webhook secrets, or production database files.
 
 ## Current Source Defaults
 
-- Google News RSS searches for high-sensitivity and regular keyword queries.
-- CPSC Recall API via `saferproducts.gov` for recall monitoring.
-- Brave Search, SerpAPI, and GNews are enabled when API keys are configured.
-- PRNewswire RSS is included as a regular-lane redundancy source.
+High-sensitivity lane (15 min, free / unmetered):
+- Google News RSS (mainstream-media follow-up)
+- CPSC Recall API via `saferproducts.gov`
+- AboutLawsuits public RSS (class-action lead-gen; `source_type=legal`)
 
-The CPSC source follows the public recall API documented by CPSC. Confirm live ToS, exact parameters, and rate limits before production deployment.
+Regular lane (hourly):
+- Brave Search / GNews (when API keys are set; throttled into free quotas)
+- Google News RSS + PRNewswire RSS redundancy
+
+`seed_sources` deactivates any source removed from `DEFAULT_SOURCES`, so the seed list is the single source of truth. The CPSC source follows the public recall API; confirm live ToS, parameters, and rate limits before relying on it.
 
 ## Tests
 
