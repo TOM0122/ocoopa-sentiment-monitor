@@ -56,13 +56,13 @@ if FastAPI is not None:
     def review_page(token: str = "", limit: int = 50) -> HTMLResponse:
         if not token_ok(settings.review_token, token):
             return HTMLResponse("<p>未授权（缺少或错误的 token）。</p>", status_code=401)
-        return HTMLResponse(render_review_page(db.list_recent_alerts(limit), token))
+        return HTMLResponse(render_review_page(db.list_recent_incidents(limit), token))
 
     @app.post("/review/mark", response_class=HTMLResponse)
-    def review_mark(alert_id: int, status: str, days: Optional[int] = None, token: str = "") -> HTMLResponse:
+    def review_mark(incident_id: int, status: str, days: Optional[int] = None, token: str = "") -> HTMLResponse:
         if not token_ok(settings.review_token, token):
             return HTMLResponse("<p>未授权（缺少或错误的 token）。</p>", status_code=401)
-        ok, message = apply_mark(db, alert_id, status, days)
+        ok, message = apply_mark(db, incident_id, status, days)
         return HTMLResponse(render_result(ok, message, token), status_code=200 if ok else 400)
 
     def _window(days: int):

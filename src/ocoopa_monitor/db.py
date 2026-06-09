@@ -614,6 +614,44 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    # --- Incident-level review (red/yellow events, even if never alerted) ---
+    def list_recent_incidents(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT g.id AS incident_id, g.fingerprint, g.primary_topic, g.risk_level_max,
+                       g.status, g.muted_until, g.mention_count, g.source_count, g.last_seen_at,
+                       m.title, m.source_url,
+                       a.needs_human_review, a.summary_zh, a.evidence_check_passed
+                FROM incident_groups g
+                LEFT JOIN mentions m ON m.id = g.representative_mention_id
+                LEFT JOIN analysis_results a ON a.id = (
+                    SELECT id FROM analysis_results
+                    WHERE mention_id = g.representative_mention_id ORDER BY id DESC LIMIT 1
+                )
+                WHERE g.risk_level_max IN ('red', 'yellow')
+                ORDER BY g.last_seen_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_fingerprint_by_incident(self, incident_id: int) -> Optional[str]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT fingerprint FROM incident_groups WHERE id=?", (incident_id,)
+            ).fetchone()
+        return row["fingerprint"] if row else None
+
+    def ack_alerts_by_fingerprint(self, event_fingerprint: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE alerts SET ack_status='acked' WHERE ack_status!='acked' "
+                "AND mention_id IN (SELECT id FROM mentions WHERE event_fingerprint=?)",
+                (event_fingerprint,),
+            )
+
     def fetch_mentions_for_day(self, date_prefix: str) -> List[sqlite3.Row]:
         with self.connect() as conn:
             return conn.execute(
@@ -1268,6 +1306,44 @@ class PostgresDatabase:
                 (cutoff,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # --- Incident-level review (red/yellow events, even if never alerted) ---
+    def list_recent_incidents(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT g.id AS incident_id, g.fingerprint, g.primary_topic, g.risk_level_max,
+                       g.status, g.muted_until, g.mention_count, g.source_count, g.last_seen_at,
+                       m.title, m.source_url,
+                       a.needs_human_review, a.summary_zh, a.evidence_check_passed
+                FROM incident_groups g
+                LEFT JOIN mentions m ON m.id = g.representative_mention_id
+                LEFT JOIN analysis_results a ON a.id = (
+                    SELECT id FROM analysis_results
+                    WHERE mention_id = g.representative_mention_id ORDER BY id DESC LIMIT 1
+                )
+                WHERE g.risk_level_max IN ('red', 'yellow')
+                ORDER BY g.last_seen_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_fingerprint_by_incident(self, incident_id: int) -> Optional[str]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT fingerprint FROM incident_groups WHERE id=%s", (incident_id,)
+            ).fetchone()
+        return row["fingerprint"] if row else None
+
+    def ack_alerts_by_fingerprint(self, event_fingerprint: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE alerts SET ack_status='acked' WHERE ack_status<>'acked' "
+                "AND mention_id IN (SELECT id FROM mentions WHERE event_fingerprint=%s)",
+                (event_fingerprint,),
+            )
 
     def fetch_mentions_between(self, start_at: datetime, end_at: datetime) -> List[Dict[str, Any]]:
         with self.connect() as conn:
