@@ -804,15 +804,34 @@ class CoreTests(unittest.TestCase):
 
         db, tmp = self.make_db()
         self._run_one(db, tmp, self._red_news("https://a.com/1", "Ocoopa death lawsuit filed"))
-        aid = db.list_recent_alerts(1)[0]["alert_id"]
-        ok, _ = apply_mark(db, aid, "false_positive")
+        incidents = db.list_recent_incidents(10)
+        self.assertTrue(incidents)
+        iid = incidents[0]["incident_id"]
+        ok, _ = apply_mark(db, iid, "false_positive")
         self.assertTrue(ok)
-        self.assertTrue(db.is_incident_suppressed(db.get_fingerprint_by_alert(aid)))
-        self.assertFalse(apply_mark(db, aid, "bogus")[0])
+        self.assertTrue(db.is_incident_suppressed(db.get_fingerprint_by_incident(iid)))
+        self.assertFalse(apply_mark(db, iid, "bogus")[0])
         self.assertFalse(apply_mark(db, 999999, "muted")[0])
-        html = render_review_page(db.list_recent_alerts(10), token="t")
+        html = render_review_page(db.list_recent_incidents(10), token="t")
         self.assertIn("/review/mark", html)
         self.assertIn("误报", html)
+
+    def test_backfilled_red_incident_is_reviewable_without_alert(self):
+        from ocoopa_monitor.review_web import apply_mark
+
+        db, tmp = self.make_db()
+        # Backfill ingests a red item: incident is created but NO real-time alert.
+        stats = MonitorPipeline(
+            db, settings(tmp.name),
+            fetchers={"static": StaticFetcher([self._red_news("https://a.com/x", "Ocoopa death lawsuit filed")])},
+        ).run_lane("high", backfill=True, since_days=30)
+        self.assertEqual(stats["alerts_created"], 0)
+        self.assertEqual(db.list_recent_alerts(10), [])
+        incidents = db.list_recent_incidents(10)
+        self.assertTrue(incidents)  # still reviewable despite never alerting
+        ok, _ = apply_mark(db, incidents[0]["incident_id"], "false_positive")
+        self.assertTrue(ok)
+        self.assertTrue(db.is_incident_suppressed(incidents[0]["fingerprint"]))
 
     def _make_aged_red_alert(self, db, tmp):
         self._run_one(db, tmp, self._red_news("https://a.com/1", "Ocoopa death lawsuit filed"))
@@ -847,8 +866,9 @@ class CoreTests(unittest.TestCase):
         from ocoopa_monitor.review_web import apply_mark
 
         db, tmp = self.make_db()
-        aid = self._make_aged_red_alert(db, tmp)
-        self.assertTrue(apply_mark(db, aid, "confirmed")[0])  # ack via review
+        self._make_aged_red_alert(db, tmp)
+        iid = db.list_recent_incidents(1)[0]["incident_id"]
+        self.assertTrue(apply_mark(db, iid, "confirmed")[0])  # ack via review (incident-level)
         captured = []
 
         class FakeDelivery:

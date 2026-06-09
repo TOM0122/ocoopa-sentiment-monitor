@@ -39,7 +39,7 @@ def main() -> None:
     doctor.add_argument("--json", action="store_true")
     review = sub.add_parser("review")
     review.add_argument("action", choices=["list", "mark"])
-    review.add_argument("alert_id", type=int, nargs="?")
+    review.add_argument("incident_id", type=int, nargs="?")
     review.add_argument("status", nargs="?", choices=["confirmed", "false_positive", "muted"])
     review.add_argument("--days", type=int, default=None, help="mute duration in days (muted only; omit = indefinite)")
     review.add_argument("--limit", type=int, default=20)
@@ -117,33 +117,33 @@ def main() -> None:
     if args.command == "review":
         db.init()
         if args.action == "list":
-            rows = db.list_recent_alerts(args.limit)
+            rows = db.list_recent_incidents(args.limit)
             if not rows:
-                print("no alerts yet")
+                print("no red/yellow incidents yet")
                 return
             for r in rows:
                 review_flag = " [需人工核实]" if r.get("needs_human_review") else ""
                 print(
-                    f"#{r['alert_id']} [{r['risk_level']}] incident={r.get('incident_status')}"
-                    f"{review_flag}\n    {r['title']}\n    {r['source_url']}\n    fingerprint={r['event_fingerprint']}"
+                    f"#{r['incident_id']} [{r['risk_level_max']}] status={r.get('status')}"
+                    f"{review_flag}\n    {r.get('title') or r.get('primary_topic')}\n    {r.get('source_url')}"
                 )
             return
-        if args.alert_id is None or args.status is None:
-            print("usage: review mark <alert_id> <confirmed|false_positive|muted> [--days N]")
+        if args.incident_id is None or args.status is None:
+            print("usage: review mark <incident_id> <confirmed|false_positive|muted> [--days N]")
             sys.exit(1)
-        fingerprint = db.get_fingerprint_by_alert(args.alert_id)
+        fingerprint = db.get_fingerprint_by_incident(args.incident_id)
         if not fingerprint:
-            print(f"alert #{args.alert_id} not found")
+            print(f"incident #{args.incident_id} not found")
             sys.exit(1)
         muted_until = None
         if args.status == "muted" and args.days:
             muted_until = utcnow() + timedelta(days=args.days)
         updated = db.review_incident(fingerprint, args.status, muted_until)
         if updated:
-            db.ack_alert(args.alert_id)
+            db.ack_alerts_by_fingerprint(fingerprint)
         print_json(
             {
-                "alert_id": args.alert_id,
+                "incident_id": args.incident_id,
                 "fingerprint": fingerprint,
                 "review_status": args.status,
                 "muted_until": muted_until,
