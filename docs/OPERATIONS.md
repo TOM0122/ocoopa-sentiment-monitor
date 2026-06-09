@@ -70,10 +70,10 @@ python -m ocoopa_monitor.cli backfill --days 180          # 仅高敏车道回�
 python -m ocoopa_monitor.cli run-lane high                # 手动跑一次高敏车道
 python -m ocoopa_monitor.cli daily-report                 # 手动生成中文日报
 python -m ocoopa_monitor.cli health --json                # 抓取源健康检查
-python -m ocoopa_monitor.cli review list                  # 列出近期告警(供人工复核)
-python -m ocoopa_monitor.cli review mark <id> confirmed       # 标记已确认(继续告警)
-python -m ocoopa_monitor.cli review mark <id> false_positive  # 标记误报(该事件永久不再实时告警)
-python -m ocoopa_monitor.cli review mark <id> muted --days 7  # 静音 7 天(到期自动恢复;省略 --days = 无限期)
+python -m ocoopa_monitor.cli review list                            # 列出近期红/黄事件(供人工复核)
+python -m ocoopa_monitor.cli review mark <incident_id> confirmed       # 标记已确认(继续告警)
+python -m ocoopa_monitor.cli review mark <incident_id> false_positive  # 标记误报(该事件永久不再实时告警)
+python -m ocoopa_monitor.cli review mark <incident_id> muted --days 7  # 静音 7 天(到期自动恢复;省略 --days = 无限期)
 python -m ocoopa_monitor.cli keyword list                     # 列出全部监控词(含停用)
 python -m ocoopa_monitor.cli keyword add "<词>" --category legal --lane high  # 新增监控词(下次抓取即生效)
 python -m ocoopa_monitor.cli keyword disable "<词>"           # 停用某词
@@ -86,7 +86,7 @@ python -m ocoopa_monitor.cli keyword enable "<词>"            # 重新启用
 
 ### Web 复核页(给非技术同事,无需终端)
 
-除 CLI 外,FastAPI 应用提供一个网页复核入口:`GET /review` 列出近期告警,每条带「确认 / 误报 / 静音7天」按钮,点一下即标记(等价于 `review mark`)。
+除 CLI 外,FastAPI 应用提供一个网页复核入口:`GET /review` 列出**近期所有红/黄事件**(含被冷启动 backfill 静默吸收、从未触发实时告警的事件),每条带「确认 / 误报 / 静音7天」按钮,点一下即按事件标记(等价于 `review mark`)。
 
 - **如何在 Railway 跑**:复核页由 FastAPI 提供,与 scheduler 是**两个进程**。新增一个 Railway 服务,指向同一个 Postgres(`OCOOPA_DB_URL=${{Postgres.DATABASE_URL}}`),启动命令:
   ```

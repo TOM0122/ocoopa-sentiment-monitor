@@ -31,7 +31,7 @@ python3 -m unittest discover -s tests          # 全部测试(Postgres 用例需
 python3 -m ocoopa_monitor.cli doctor --production   # 上线自检
 python3 -m ocoopa_monitor.cli bootstrap        # 冷启动:静默 backfill 两车道 + 标记
 python3 -m ocoopa_monitor.cli scheduler        # 主循环
-python3 -m ocoopa_monitor.cli review list|mark <id> <confirmed|false_positive|muted> [--days N]
+python3 -m ocoopa_monitor.cli review list|mark <incident_id> <confirmed|false_positive|muted> [--days N]  # 事件级,覆盖所有红/黄(不只告警过的)
 python3 -m ocoopa_monitor.cli keyword list|add "<词>"|enable|disable [--category C --lane high|regular]
 ```
 
