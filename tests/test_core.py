@@ -823,6 +823,65 @@ class CoreTests(unittest.TestCase):
         html = render_review_page(db.list_recent_incidents(10), token="t")
         self.assertIn("/review/mark", html)
         self.assertIn("误报", html)
+        self.assertIn("先处理需要判断的事件", html)
+        self.assertIn("确认并跟进", html)
+        self.assertIn("需人工核实", html)
+        self.assertIn('method="post"', html)
+
+    def test_review_web_uses_safe_source_links_and_prioritizes_pending_work(self):
+        from ocoopa_monitor.review_web import render_review_page
+
+        html = render_review_page(
+            [
+                {
+                    "incident_id": 1,
+                    "risk_level_max": "yellow",
+                    "status": "resolved",
+                    "needs_human_review": False,
+                    "evidence_check_passed": True,
+                    "title": "Handled event",
+                    "summary_zh": "Already reviewed",
+                    "mention_count": 1,
+                    "source_count": 1,
+                    "last_seen_at": "2026-07-31T09:00:00Z",
+                    "source_url": "javascript:alert(1)",
+                },
+                {
+                    "incident_id": 2,
+                    "risk_level_max": "red",
+                    "status": "active",
+                    "needs_human_review": True,
+                    "evidence_check_passed": False,
+                    "title": "Priority event",
+                    "summary_zh": "Needs a source check",
+                    "mention_count": 3,
+                    "source_count": 2,
+                    "last_seen_at": "2026-07-30T09:00:00Z",
+                    "source_url": "https://example.com/record",
+                },
+                {
+                    "incident_id": 3,
+                    "risk_level_max": "yellow",
+                    "status": "muted",
+                    "muted_until": dt_to_str(utcnow() - timedelta(days=1)),
+                    "needs_human_review": False,
+                    "evidence_check_passed": True,
+                    "title": "Expired mute",
+                    "summary_zh": "Needs another decision",
+                    "mention_count": 1,
+                    "source_count": 1,
+                    "last_seen_at": "2026-07-31T10:00:00Z",
+                    "source_url": "https://example.com/expired",
+                },
+            ],
+            token="t",
+        )
+        self.assertLess(html.index("Priority event"), html.index("Handled event"))
+        self.assertLess(html.index("Expired mute"), html.index("Handled event"))
+        self.assertIn("静音已到期", html)
+        self.assertIn('rel="noopener noreferrer"', html)
+        self.assertIn("原始来源链接不可用", html)
+        self.assertNotIn("javascript:alert", html)
 
     def test_backfilled_red_incident_is_reviewable_without_alert(self):
         from ocoopa_monitor.review_web import apply_mark
