@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import csv
 import io
-from collections import Counter
 from html import escape
 from typing import Any, Dict, Iterable, List
 from urllib.parse import urlencode
 
-# Built on existing db.fetch_mentions_between() rows (mentions + analysis fields)
-# and db.list_recent_alerts() — no new per-backend SQL. All aggregation/filtering
-# happens here in Python so it works identically on SQLite and Postgres.
+from .analysis_web import compute_dashboard, render_dashboard
+
+# Search and export are built on db.fetch_mentions_between() rows. Dashboard
+# aggregation lives in analysis_web and receives time-bounded alert rows so the
+# same reporting window is applied on SQLite and Postgres.
 
 CSV_COLUMNS = [
     "published_at",
@@ -30,19 +31,6 @@ CSV_COLUMNS = [
 
 def _rows(rows: Iterable[Any]) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
-
-
-def compute_dashboard(rows: Iterable[Any], alerts: Iterable[Any]) -> Dict[str, Any]:
-    data = _rows(rows)
-    top = [r for r in data if r.get("risk_level") in {"red", "yellow"}][:20]
-    return {
-        "total": len(data),
-        "alerts": len(list(alerts)),
-        "risk": dict(Counter(str(r.get("risk_level") or "unknown") for r in data)),
-        "sentiment": dict(Counter(str(r.get("sentiment") or "unknown") for r in data)),
-        "source": dict(Counter(str(r.get("source_name") or "unknown") for r in data)),
-        "top": top,
-    }
 
 
 def filter_rows(rows: Iterable[Any], q: str = "", risk: str = "") -> List[Dict[str, Any]]:
@@ -96,31 +84,6 @@ def _page(title: str, body: str) -> str:
     )
 
 
-def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "") -> str:
-    nav = (
-        f'<a href="/console/search{_q(token)}">检索</a> · '
-        f'<a href="/console/export.csv{_q(token, days=window_days)}">导出 CSV</a>'
-    )
-    dist = (
-        f"<p>近 {window_days} 天提及：<b>{stats['total']}</b> · 实时告警：<b>{stats['alerts']}</b></p>"
-        f"<p>风险分布：{escape(str(stats['risk']))}<br>"
-        f"情感分布：{escape(str(stats['sentiment']))}<br>"
-        f"来源分布：{escape(str(stats['source']))}</p>"
-    )
-    items = "".join(
-        "<li>"
-        f'<span class="tag">{escape(str(r.get("risk_level")))}</span> '
-        f'{escape(str(r.get("title") or ""))}'
-        f'{" · 需人工核实" if r.get("needs_human_review") else ""}<br>'
-        f'<a href="{escape(str(r.get("source_url") or ""))}" target="_blank">'
-        f'{escape(str(r.get("source_url") or ""))}</a>'
-        "</li>"
-        for r in stats["top"]
-    )
-    top = f"<h3>近期红/黄风险</h3><ul>{items or '<li>暂无</li>'}</ul>"
-    return _page("Ocoopa 舆情看板", f"<h2>Ocoopa 舆情看板</h2><p>{nav}</p>{dist}{top}")
-
-
 def render_search(rows: List[Dict[str, Any]], q: str, risk: str, window_days: int, token: str = "") -> str:
     form = (
         f'<form method="get" action="/console/search">'
@@ -147,5 +110,5 @@ def render_search(rows: List[Dict[str, Any]], q: str, risk: str, window_days: in
         "<table><tr><th>风险</th><th>来源</th><th>标题</th><th>摘要</th></tr>"
         f"{body_rows or '<tr><td colspan=4>无匹配结果</td></tr>'}</table>"
     )
-    back = f'<p><a href="/dashboard{_q(token)}">← 看板</a></p>'
+    back = f'<p><a href="/review/analysis{_q(token, days=window_days)}">← 分析看板</a></p>'
     return _page("Ocoopa 舆情检索", f"<h2>Ocoopa 舆情检索</h2>{back}{form}<p>共 {len(rows)} 条</p>{table}")

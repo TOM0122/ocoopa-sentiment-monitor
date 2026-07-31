@@ -6,8 +6,9 @@ try:
 except ImportError:  # pragma: no cover - optional runtime dependency
     FastAPI = None  # type: ignore
 
-from datetime import timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from .config import load_settings
 from .console_web import compute_dashboard, filter_rows, render_dashboard, render_search, rows_to_csv
@@ -104,10 +105,14 @@ if FastAPI is not None:
         ok, message = apply_mark(db, incident_id, status, days)
         return HTMLResponse(render_result(ok, message, token), status_code=200 if ok else 400)
 
-    def _window(days: int):
+    def _window(days: int, timezone_name: str = "Asia/Shanghai"):
         end = utcnow()
-        return end - timedelta(days=max(1, days)), end
+        tz = ZoneInfo(timezone_name)
+        local_start_date = end.astimezone(tz).date() - timedelta(days=max(1, days) - 1)
+        local_start = datetime.combine(local_start_date, time.min, tzinfo=tz)
+        return local_start.astimezone(timezone.utc), end
 
+    @app.get("/review/analysis", response_class=HTMLResponse)
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard(
         token: str = "",
@@ -118,7 +123,13 @@ if FastAPI is not None:
             return _unauthorized(HTMLResponse)
         days = min(max(days, 1), 366)
         start, end = _window(days)
-        stats = compute_dashboard(db.fetch_mentions_between(start, end), db.list_recent_alerts(1000))
+        stats = compute_dashboard(
+            db.fetch_mentions_between(start, end),
+            db.fetch_alerts_between(start, end),
+            window_days=days,
+            timezone_name="Asia/Shanghai",
+            now=end,
+        )
         return HTMLResponse(render_dashboard(stats, days, token))
 
     @app.get("/console/search", response_class=HTMLResponse)

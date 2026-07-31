@@ -162,6 +162,11 @@ def render_review_page(incidents: List[Dict[str, Any]], token: str = "") -> str:
         or (str(it.get("status") or "") == "muted" and not _mute_is_active(it))
         for it in ordered
     )
+    review_href = "/review" + (f"?{urlencode({'token': token})}" if token else "")
+    analysis_params: Dict[str, Any] = {"days": 30}
+    if token:
+        analysis_params["token"] = token
+    analysis_href = "/review/analysis?" + urlencode(analysis_params)
     rows = "".join(_render_incident(incident, token) for incident in ordered)
     body = (
         f'<section class="incident-list" aria-label="复核事件列表">{rows}</section>'
@@ -182,6 +187,7 @@ def render_review_page(incidents: List[Dict[str, Any]], token: str = "") -> str:
         '--red:#b42318;--red-soft:#fff1f0;--amber:#9a6700;--amber-soft:#fff8e8;--green:#1f6b49;--green-soft:#effaf4;'
         '--radius:12px}*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);'
         'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.5}.page{max-width:1120px;margin:0 auto;padding:32px 20px 56px}'
+        '.workspace-nav{display:flex;gap:6px;width:max-content;margin-bottom:26px;padding:5px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}.workspace-nav a{padding:8px 13px;border-radius:7px;color:var(--muted);font-weight:700;text-decoration:none}.workspace-nav a[aria-current="page"]{background:var(--accent);color:#fff}'
         '.page-header{padding:8px 0 24px}.eyebrow{margin:0 0 7px;color:var(--accent);font-size:.78rem;font-weight:700;letter-spacing:.08em}'
         'h1,h2,p{margin-top:0}h1{margin-bottom:8px;font-size:clamp(1.75rem,4vw,2.35rem);letter-spacing:-.03em;line-height:1.15}'
         '.intro{max-width:760px;margin:0;color:var(--muted)}.overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:20px}'
@@ -199,9 +205,12 @@ def render_review_page(incidents: List[Dict[str, Any]], token: str = "") -> str:
         '.review-action--primary{border-color:var(--accent);background:var(--accent);color:#fff}.review-action:hover{border-color:var(--accent)}.review-action--primary:hover{background:var(--accent-strong)}.review-action:active{transform:translateY(1px)}'
         '.review-action:focus-visible,.source-link:focus-visible,summary:focus-visible{outline:3px solid #7dd3fc;outline-offset:2px}.review-correction{margin-top:3px}.review-correction summary{color:var(--muted);font-size:.88rem;cursor:pointer}.review-correction .review-actions{margin-top:11px}'
         '.empty-state{padding:38px 24px;border:1px dashed #aab8c9;border-radius:var(--radius);background:var(--surface);text-align:center}.empty-state h2{font-size:1.2rem}.empty-state p{margin-bottom:0;color:var(--muted)}'
-        '@media (max-width:720px){.page{padding:24px 14px 40px}.overview{grid-template-columns:repeat(2,minmax(0,1fr))}.incident{padding:16px}.incident-meta{grid-template-columns:1fr;gap:9px}.review-action{width:100%}.review-action-form{flex:1 1 100%}}'
-        '@media (prefers-color-scheme:dark){:root{--canvas:#111a29;--surface:#172235;--ink:#eff6ff;--muted:#b1c0d3;--line:#34455e;--accent:#7dd3fc;--accent-strong:#bae6fd;--soft:#12324a;--shadow:0 12px 32px rgba(0,0,0,.2);--red:#ffb4ac;--red-soft:#482523;--amber:#ffd68a;--amber-soft:#423313;--green:#a4e2c0;--green-soft:#173a2b}.intro,.incident-summary{color:var(--muted)}.review-guidance{color:#c8eafa}.source-link{color:var(--accent)}.review-action{background:#172235;color:var(--ink);border-color:#52657c}.review-action--primary{background:#7dd3fc;border-color:#7dd3fc;color:#082f49}.review-action--primary:hover{background:#bae6fd}}'
-        '</style></head><body><main class="page"><header class="page-header"><p class="eyebrow">OCOOPA / 召回复核工作台</p>'
+        '@media (max-width:720px){.page{padding:24px 14px 40px}.workspace-nav{width:100%}.workspace-nav a{flex:1;text-align:center}.overview{grid-template-columns:repeat(2,minmax(0,1fr))}.incident{padding:16px}.incident-meta{grid-template-columns:1fr;gap:9px}.review-action{width:100%}.review-action-form{flex:1 1 100%}}'
+        '@media (prefers-color-scheme:dark){:root{--canvas:#111a29;--surface:#172235;--ink:#eff6ff;--muted:#b1c0d3;--line:#34455e;--accent:#7dd3fc;--accent-strong:#bae6fd;--soft:#12324a;--shadow:0 12px 32px rgba(0,0,0,.2);--red:#ffb4ac;--red-soft:#482523;--amber:#ffd68a;--amber-soft:#423313;--green:#a4e2c0;--green-soft:#173a2b}.workspace-nav a[aria-current="page"]{background:#7dd3fc;color:#082f49}.intro,.incident-summary{color:var(--muted)}.review-guidance{color:#c8eafa}.source-link{color:var(--accent)}.review-action{background:#172235;color:var(--ink);border-color:#52657c}.review-action--primary{background:#7dd3fc;border-color:#7dd3fc;color:#082f49}.review-action--primary:hover{background:#bae6fd}}'
+        '</style></head><body><main class="page"><nav class="workspace-nav" aria-label="舆情工作台">'
+        f'<a href="{escape(review_href, quote=True)}" aria-current="page">事件复核</a>'
+        f'<a href="{escape(analysis_href, quote=True)}">分析看板</a></nav>'
+        '<header class="page-header"><p class="eyebrow">OCOOPA / 召回复核工作台</p>'
         '<h1>先处理需要判断的事件</h1><p class="intro">红色和黄色事件按待办优先级排列。请先核对原始来源，再记录结论。</p></header>'
         '<section class="overview" aria-label="本页风险概览">'
         f'<div class="metric"><b>{total}</b><span>本页红黄事件</span></div>'

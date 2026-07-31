@@ -16,7 +16,7 @@ The core pipeline runs on the Python standard library; the web console/review UI
 - dedicated CPSC 26-659 recall registry covering affected models, Reddit Atom, news/RSS, CPSC, legal feeds, and general-web search APIs
 - auditable group-history import and UTF-8 CSV statistics-table export
 - human feedback loop (confirm / false-positive / mute) via the `review` CLI and the web review page
-- read-only operations console: dashboard, search, CSV export
+- read-only operations console: daily trend line, keyword/topic synthesis, management summary, recommended actions, search, and CSV export
 
 ## Quick Start
 

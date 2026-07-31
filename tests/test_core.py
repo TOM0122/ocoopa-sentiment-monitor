@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from ocoopa_monitor.analysis import AnalysisService
@@ -824,6 +824,8 @@ class CoreTests(unittest.TestCase):
         self.assertIn("/review/mark", html)
         self.assertIn("误报", html)
         self.assertIn("先处理需要判断的事件", html)
+        self.assertIn("分析看板", html)
+        self.assertIn("/review/analysis", html)
         self.assertIn("确认并跟进", html)
         self.assertIn("需人工核实", html)
         self.assertIn('method="post"', html)
@@ -960,9 +962,16 @@ class CoreTests(unittest.TestCase):
         db, tmp = self.make_db()
         self._run_one(db, tmp, self._red_news("https://a.com/1", "Ocoopa death lawsuit filed"))
         rows = db.fetch_mentions_between(utcnow() - timedelta(days=1), utcnow() + timedelta(days=1))
-        stats = compute_dashboard(rows, db.list_recent_alerts(100))
+        alerts = db.fetch_alerts_between(
+            utcnow() - timedelta(days=1), utcnow() + timedelta(days=1)
+        )
+        stats = compute_dashboard(rows, alerts, window_days=30)
         self.assertGreaterEqual(stats["total"], 1)
+        self.assertEqual(stats["alerts"], len(alerts))
         self.assertIn("red", stats["risk"])
+        self.assertEqual(len(stats["daily"]), 30)
+        self.assertTrue(stats["summaries"])
+        self.assertTrue(stats["recommendations"])
         self.assertTrue(stats["top"])
         # search filtering
         self.assertTrue(filter_rows(rows, q="ocoopa"))
@@ -973,8 +982,83 @@ class CoreTests(unittest.TestCase):
         self.assertIn("source_url", csv_text.splitlines()[0])
         self.assertIn("https://a.com/1", csv_text)
         # HTML renders
-        self.assertIn("舆情看板", render_dashboard(stats, 30, "t"))
+        dashboard_html = render_dashboard(stats, 30, "t")
+        self.assertIn("舆情分析看板", dashboard_html)
+        self.assertIn("每日新增与风险走线", dashboard_html)
+        self.assertIn("自动归纳", dashboard_html)
+        self.assertIn("下一步建议", dashboard_html)
         self.assertIn("检索", render_search(filter_rows(rows), "", "", 30, "t"))
+
+    def test_analysis_dashboard_groups_daily_trends_and_keywords_safely(self):
+        from ocoopa_monitor.console_web import compute_dashboard, render_dashboard
+
+        rows = [
+            {
+                "fetched_at": "2026-07-31T01:00:00+00:00",
+                "risk_level": "red",
+                "sentiment": "negative",
+                "category": "recall",
+                "source_name": "CPSC",
+                "matched_keywords": '["OCOOPA 26-659", "search_api_query_hit"]',
+                "event_fingerprint": "event-1",
+                "is_new": 1,
+                "backfill": 0,
+                "needs_human_review": 1,
+                "title": "Recall update",
+                "summary_zh": "Needs verification",
+                "source_url": "https://example.com/record",
+            },
+            {
+                "fetched_at": "2026-07-30T01:00:00+00:00",
+                "risk_level": "green",
+                "sentiment": "neutral",
+                "category": "media_report",
+                "source_name": "News",
+                "matched_keywords": ["Ocoopa recall"],
+                "event_fingerprint": "event-2",
+                "is_new": 1,
+                "backfill": 0,
+                "needs_human_review": 0,
+                "title": "Coverage",
+                "summary_zh": "General coverage",
+                "source_url": "javascript:alert(1)",
+            },
+            {
+                "fetched_at": "2026-07-31T02:00:00+00:00",
+                "risk_level": "red",
+                "sentiment": "negative",
+                "category": "recall",
+                "source_name": "Archive",
+                "matched_keywords": ["ocoopa 26-659"],
+                "event_fingerprint": "event-1",
+                "is_new": 0,
+                "backfill": 1,
+                "needs_human_review": 0,
+                "title": "Historical duplicate",
+                "summary_zh": "Backfill",
+                "source_url": "https://example.com/archive",
+            },
+        ]
+        stats = compute_dashboard(
+            rows,
+            [{"alert_id": 1}],
+            window_days=7,
+            now=datetime(2026, 7, 31, 12, tzinfo=timezone.utc),
+        )
+        self.assertEqual(stats["total"], 3)
+        self.assertEqual(stats["daily"][-1]["total"], 1)
+        self.assertEqual(stats["backfill_mentions"], 1)
+        self.assertEqual(len(stats["top"]), 1)
+        self.assertTrue(any("历史回溯" in item for item in stats["summaries"]))
+        self.assertEqual(stats["keywords"][0]["keyword"], "OCOOPA 26-659")
+        self.assertEqual(stats["keywords"][0]["count"], 2)
+        self.assertNotIn(
+            "search_api_query_hit", {item["keyword"] for item in stats["keywords"]}
+        )
+        html = render_dashboard(stats, 7, "t")
+        self.assertIn("高频关键词", html)
+        self.assertIn("召回与监管", html)
+        self.assertNotIn("javascript:alert", html)
 
 
 if __name__ == "__main__":
