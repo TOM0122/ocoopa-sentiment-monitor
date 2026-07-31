@@ -610,7 +610,8 @@ class Database:
     def mark_delivery_sent(self, job_id: int, sent_to: str, sent_at: datetime) -> None:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT entity_type, entity_id FROM delivery_outbox WHERE id=?", (job_id,)
+                "SELECT entity_type, entity_id, payload_json FROM delivery_outbox WHERE id=?",
+                (job_id,),
             ).fetchone()
             conn.execute(
                 """
@@ -642,6 +643,45 @@ class Database:
                     """,
                     (dt_to_str(sent_at), dt_to_str(sent_at), row["entity_id"]),
                 )
+            if row and row["entity_type"] == "recall_batch":
+                payload = json.loads(row["payload_json"])
+                record_ids = [
+                    int(record_id)
+                    for record_id in payload.get("_recall_record_ids", [])
+                    if str(record_id).isdigit()
+                ]
+                if record_ids:
+                    placeholders = ",".join("?" for _ in record_ids)
+                    conn.execute(
+                        f"""
+                        UPDATE recall_mentions
+                        SET sync_status='synced', synced_at=?, updated_at=?
+                        WHERE id IN ({placeholders})
+                        """,
+                        (dt_to_str(sent_at), dt_to_str(sent_at), *record_ids),
+                    )
+
+    def supersede_pending_recall_updates(self) -> int:
+        """Retire legacy one-item jobs without marking their registry rows synced."""
+        now = dt_to_str(utcnow())
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE delivery_outbox
+                SET status='superseded', updated_at=?
+                WHERE status='pending' AND kind='recall_update'
+                """,
+                (now,),
+            )
+            return cur.rowcount
+
+    def has_pending_delivery(self, kind: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM delivery_outbox WHERE status='pending' AND kind=? LIMIT 1",
+                (kind,),
+            ).fetchone()
+        return row is not None
 
     def mark_delivery_failed(self, job_id: int, error: str, next_attempt_at: datetime) -> None:
         with self.connect() as conn:
@@ -713,9 +753,12 @@ class Database:
                        r.first_discovered_at, r.last_seen_at, r.group_synced_at, r.synced_at,
                        m.id AS mention_id, m.source_type, m.source_name, m.source_url,
                        m.title, m.author_or_publisher, m.published_at, m.fetched_at,
-                       m.text_excerpt, m.matched_keywords,
+                       m.text_excerpt, m.matched_keywords, m.backfill, m.event_fingerprint,
                        a.sentiment, a.risk_level, a.category, a.summary_zh,
-                       a.confidence, a.evidence_check_passed, a.needs_human_review
+                       a.confidence, a.evidence_check_passed, a.needs_human_review,
+                       EXISTS(
+                           SELECT 1 FROM alerts alert WHERE alert.mention_id=m.id
+                       ) AS has_alert
                 FROM recall_mentions r
                 JOIN mentions m ON m.id=r.mention_id
                 LEFT JOIN analysis_results a ON a.id=(
@@ -1515,7 +1558,8 @@ class PostgresDatabase:
     def mark_delivery_sent(self, job_id: int, sent_to: str, sent_at: datetime) -> None:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT entity_type, entity_id FROM delivery_outbox WHERE id=%s", (job_id,)
+                "SELECT entity_type, entity_id, payload_json FROM delivery_outbox WHERE id=%s",
+                (job_id,),
             ).fetchone()
             conn.execute(
                 """
@@ -1543,6 +1587,44 @@ class PostgresDatabase:
                     "UPDATE recall_mentions SET sync_status='synced', synced_at=%s, updated_at=%s WHERE id=%s",
                     (sent_at, sent_at, row["entity_id"]),
                 )
+            if row and row["entity_type"] == "recall_batch":
+                raw_payload = row["payload_json"]
+                payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+                record_ids = [
+                    int(record_id)
+                    for record_id in payload.get("_recall_record_ids", [])
+                    if str(record_id).isdigit()
+                ]
+                if record_ids:
+                    conn.execute(
+                        """
+                        UPDATE recall_mentions
+                        SET sync_status='synced', synced_at=%s, updated_at=%s
+                        WHERE id = ANY(%s)
+                        """,
+                        (sent_at, sent_at, record_ids),
+                    )
+
+    def supersede_pending_recall_updates(self) -> int:
+        """Retire legacy one-item jobs without marking their registry rows synced."""
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE delivery_outbox
+                SET status='superseded', updated_at=%s
+                WHERE status='pending' AND kind='recall_update'
+                """,
+                (utcnow(),),
+            )
+            return cur.rowcount
+
+    def has_pending_delivery(self, kind: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM delivery_outbox WHERE status='pending' AND kind=%s LIMIT 1",
+                (kind,),
+            ).fetchone()
+        return row is not None
 
     def mark_delivery_failed(self, job_id: int, error: str, next_attempt_at: datetime) -> None:
         with self.connect() as conn:
@@ -1595,9 +1677,12 @@ class PostgresDatabase:
                        r.first_discovered_at, r.last_seen_at, r.group_synced_at, r.synced_at,
                        m.id AS mention_id, m.source_type, m.source_name, m.source_url,
                        m.title, m.author_or_publisher, m.published_at, m.fetched_at,
-                       m.text_excerpt, m.matched_keywords,
+                       m.text_excerpt, m.matched_keywords, m.backfill, m.event_fingerprint,
                        a.sentiment, a.risk_level, a.category, a.summary_zh,
-                       a.confidence, a.evidence_check_passed, a.needs_human_review
+                       a.confidence, a.evidence_check_passed, a.needs_human_review,
+                       EXISTS(
+                           SELECT 1 FROM alerts alert WHERE alert.mention_id=m.id
+                       ) AS has_alert
                 FROM recall_mentions r
                 JOIN mentions m ON m.id=r.mention_id
                 LEFT JOIN analysis_results a ON a.id=(

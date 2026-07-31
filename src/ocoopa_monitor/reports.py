@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import re
 from collections import Counter
 from datetime import datetime, time, timedelta, timezone
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from .db import Database
+from .delivery import short_markdown_link
 
 
 class DailyReportService:
@@ -38,7 +40,7 @@ class DailyReportService:
             }
             for row in rows
             if row["risk_level"] in {"red", "yellow"}
-        ][:10]
+        ][:5]
         recommended_actions = self._recommended_actions(top_risks)
         text = self._render(
             report_date=report_date,
@@ -104,26 +106,117 @@ class DailyReportService:
         top_risks: List[Dict[str, object]],
         recommended_actions: List[str],
     ) -> str:
+        conclusions = DailyReportService._conclusions(
+            total, new_mentions, backfill_mentions, risks, top_risks
+        )
         lines = [
-            f"# Ocoopa 舆情日报 {report_date}",
+            f"### 【OCOOPA 舆情日报｜{report_date}】",
             "",
-            f"- 今日提及总数：{total}",
-            f"- 新增提及：{new_mentions}",
-            f"- 历史回溯提及：{backfill_mentions}",
-            f"- 情感分布：{sentiment}",
-            f"- 风险分布：{risks}",
-            f"- 渠道分布：{sources}",
+            "#### 总览",
+            f"- 今日收录：{total} 条｜新增 {new_mentions} 条｜历史回溯 {backfill_mentions} 条",
+            (
+                f"- 风险分布：红 {risks.get('red', 0)}｜黄 {risks.get('yellow', 0)}"
+                f"｜绿 {risks.get('green', 0)}｜未分级 {risks.get('unknown', 0)}"
+            ),
+            (
+                "- 情感分布："
+                f"{DailyReportService._format_distribution(sentiment, 4, translate_sentiment=True)}"
+            ),
+            f"- 主要渠道：{DailyReportService._format_distribution(sources, 4)}",
             "",
-            "## Top 风险项",
+            "#### 核心结论",
         ]
+        lines.extend(f"- {item}" for item in conclusions)
+        lines.extend(["", "#### 重点风险"])
         if not top_risks:
             lines.append("- 暂无红/黄级风险项。")
-        for item in top_risks:
-            review = "，需人工核实" if item.get("needs_human_review") else ""
-            evidence = "证据已校验" if item.get("evidence_check_passed") else "证据未完全校验"
-            lines.append(f"- [{item['risk_level']}] {item['title']}（{evidence}{review}）")
-            lines.append(f"  来源：{item['url']}")
-            lines.append(f"  摘要：{item.get('summary_zh') or '无'}")
-        lines.extend(["", "## 建议动作"])
+        for index, item in enumerate(top_risks, 1):
+            evidence = (
+                "待核实"
+                if item.get("needs_human_review") or not item.get("evidence_check_passed")
+                else "已校验"
+            )
+            lines.append(
+                f"{index}. **[{DailyReportService._risk_label(item['risk_level'])}] "
+                f"{DailyReportService._compact(item['title'], 110)}**"
+            )
+            lines.append(
+                f"   - 摘要：{DailyReportService._compact(item.get('summary_zh') or '暂无摘要', 180)}"
+            )
+            lines.append(
+                f"   - 来源：{item.get('source') or '未知'}"
+                f"｜证据：{evidence}｜{short_markdown_link(item.get('url'))}"
+            )
+        lines.extend(["", "#### 建议动作"])
         lines.extend(f"- {action}" for action in recommended_actions)
         return "\n".join(lines)
+
+    @staticmethod
+    def _conclusions(
+        total: int,
+        new_mentions: int,
+        backfill_mentions: int,
+        risks: Dict[str, int],
+        top_risks: List[Dict[str, object]],
+    ) -> List[str]:
+        if risks.get("red", 0):
+            lead = f"今日出现 {risks['red']} 条红色风险，需优先复核重点风险及原始证据。"
+        elif risks.get("yellow", 0):
+            lead = f"今日未出现红色风险，{risks['yellow']} 条黄色风险需持续跟踪。"
+        elif total:
+            lead = "今日未出现红/黄级风险，整体舆情暂未发现新增高危信号。"
+        else:
+            lead = "今日未收录相关提及，请同时确认重点数据源运行状态。"
+        conclusions = [lead]
+        if backfill_mentions:
+            conclusions.append(
+                f"其中 {backfill_mentions} 条为历史回溯，不应解读为今日新发舆情。"
+            )
+        review_count = sum(bool(item.get("needs_human_review")) for item in top_risks)
+        if review_count:
+            conclusions.append(
+                f"重点风险中有 {review_count} 条待人工核实，核验前不得作为确证事实外传。"
+            )
+        elif new_mentions:
+            conclusions.append("新增内容已统一登记，继续观察是否形成跨平台扩散。")
+        return conclusions
+
+    @staticmethod
+    def _format_distribution(
+        values: Dict[str, int], limit: int, translate_sentiment: bool = False
+    ) -> str:
+        if not values:
+            return "暂无"
+        ordered = sorted(values.items(), key=lambda item: (-item[1], item[0]))
+        labels = {
+            "negative": "负面",
+            "neutral": "中性",
+            "positive": "正面",
+            "unknown": "未判定",
+        }
+        visible = [
+            (
+                f"{labels.get(name, name) if translate_sentiment else DailyReportService._compact(name, 28)}"
+                f" {count}"
+            )
+            for name, count in ordered[:limit]
+        ]
+        remainder = sum(count for _, count in ordered[limit:])
+        if remainder:
+            visible.append(f"其他 {remainder}")
+        return "｜".join(visible)
+
+    @staticmethod
+    def _compact(value: object, limit: int) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    @staticmethod
+    def _risk_label(value: object) -> str:
+        return {
+            "red": "红色",
+            "yellow": "黄色",
+            "green": "绿色",
+        }.get(str(value or "").lower(), "未分级")

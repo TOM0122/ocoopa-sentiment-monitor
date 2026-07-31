@@ -4,10 +4,12 @@ import csv
 import hashlib
 import json
 import re
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+from .delivery import short_markdown_link
 from .models import RawItem, utcnow
 
 CAMPAIGN_KEY = "ocoopa-cpsc-26-659"
@@ -36,25 +38,6 @@ def is_current_recall(title: str, raw_text: str) -> bool:
         (brand and (identity or hand_warmer))
         or (identity and hand_warmer)
     )
-
-
-def recall_update_payload(mention, analysis) -> Dict[str, object]:
-    evidence = "已校验" if analysis.evidence_check_passed else "待人工核实"
-    text = (
-        "### 【OCOOPA 召回舆情新增】\n\n"
-        f"- 平台/来源：{mention.source_type} / {mention.source_name}\n"
-        f"- 标题：{mention.title}\n"
-        f"- 风险：{analysis.risk_level}（{evidence}）\n"
-        f"- 摘要：{analysis.summary_zh}\n"
-        f"- 原文：{mention.source_url}\n"
-        f"- 发现时间：{mention.fetched_at.isoformat()}"
-    )
-    return {
-        "title": "OCOOPA 召回舆情新增",
-        "text": text,
-        "suppress_at": True,
-        "needs_human_review": analysis.needs_human_review,
-    }
 
 
 class RecallRegistryService:
@@ -127,24 +110,38 @@ class RecallRegistryService:
         return len(rows)
 
     def queue_pending(self, limit: int = 10) -> int:
-        queued = 0
+        # Retire pending one-item jobs created by the previous release. Their
+        # registry rows remain pending and are folded into this summary.
+        self.db.supersede_pending_recall_updates()
+        # Keep exactly one retryable digest in flight. Newly discovered rows
+        # wait for the next scheduler tick instead of being duplicated across
+        # overlapping summaries.
+        if self.db.has_pending_delivery("recall_digest"):
+            return 0
+        rows = []
         for row in self.db.list_recall_mentions(limit=5000):
-            if row.get("sync_status") != "pending":
+            if (
+                row.get("sync_status") != "pending"
+                or row.get("has_alert")
+                or row.get("backfill")
+                or self.db.is_incident_suppressed(str(row.get("event_fingerprint") or ""))
+            ):
                 continue
-            record_id = int(row["recall_record_id"])
-            payload = recall_update_payload_from_row(row)
-            queued += int(
-                self.db.enqueue_delivery(
-                    kind="recall_update",
-                    dedupe_key=f"recall:{row['mention_id']}",
-                    entity_type="recall_mention",
-                    entity_id=record_id,
-                    payload=payload,
-                )
-            )
-            if queued >= limit:
+            rows.append(row)
+            if len(rows) >= limit:
                 break
-        return queued
+        if not rows:
+            return 0
+        record_ids = sorted(int(row["recall_record_id"]) for row in rows)
+        digest = hashlib.sha256(",".join(map(str, record_ids)).encode("ascii")).hexdigest()[:20]
+        queued = self.db.enqueue_delivery(
+            kind="recall_digest",
+            dedupe_key=f"recall-digest:{digest}",
+            entity_type="recall_batch",
+            entity_id=0,
+            payload=recall_digest_payload(rows),
+        )
+        return len(rows) if queued else 0
 
     def backfill_existing(self, *, assume_group_reported: bool = True) -> Dict[str, int]:
         """Register recall mentions already present before this feature shipped.
@@ -201,20 +198,98 @@ def _csv_safe(value):
     return text
 
 
-def recall_update_payload_from_row(row: Dict[str, object]) -> Dict[str, object]:
-    evidence = "已校验" if row.get("evidence_check_passed") else "待人工核实"
-    text = (
-        "### 【OCOOPA 召回舆情补充登记】\n\n"
-        f"- 平台/来源：{row.get('source_type')} / {row.get('source_name')}\n"
-        f"- 标题：{row.get('title')}\n"
-        f"- 风险：{row.get('risk_level') or '未分级'}（{evidence}）\n"
-        f"- 摘要：{row.get('summary_zh') or row.get('text_excerpt') or '无'}\n"
-        f"- 原文：{row.get('source_url')}\n"
-        f"- 首次发现：{row.get('first_discovered_at')}"
+def recall_digest_payload(rows: List[Dict[str, object]]) -> Dict[str, object]:
+    risks = Counter(str(row.get("risk_level") or "unrated") for row in rows)
+    sources = Counter(str(row.get("source_type") or "unknown") for row in rows)
+    needs_review = sum(bool(row.get("needs_human_review")) for row in rows)
+    source_summary = "、".join(
+        f"{_source_label(name)} {count} 条" for name, count in sources.most_common(4)
+    ) or "暂无"
+    if risks.get("red"):
+        conclusion = f"本批包含 {risks['red']} 条红色风险，需优先查看重点信息。"
+    elif risks.get("yellow"):
+        conclusion = f"本批以跟进观察为主，包含 {risks['yellow']} 条黄色风险。"
+    else:
+        conclusion = "本批未出现新增红色风险，继续观察传播变化。"
+    lines = [
+        "### 【OCOOPA 召回舆情总览】",
+        "",
+        "#### 总览",
+        f"- 本次新增：{len(rows)} 条",
+        (
+            f"- 风险分布：红 {risks.get('red', 0)}｜黄 {risks.get('yellow', 0)}"
+            f"｜绿 {risks.get('green', 0)}｜未分级 {risks.get('unrated', 0)}"
+        ),
+        f"- 渠道分布：{source_summary}",
+        f"- 待人工核实：{needs_review} 条",
+        "",
+        "#### 核心结论",
+        f"- {conclusion}",
+        "- 多渠道信息已统一归入本次总览，完整记录保留在召回统计表。",
+        "",
+        "#### 重点信息",
+    ]
+    for index, row in enumerate(rows[:8], 1):
+        risk = _risk_label(row.get("risk_level"))
+        title = _compact(row.get("title"), 110)
+        summary = _compact(row.get("summary_zh") or row.get("text_excerpt") or "暂无摘要", 180)
+        evidence = (
+            "待核实"
+            if row.get("needs_human_review") or not row.get("evidence_check_passed")
+            else "已校验"
+        )
+        lines.extend(
+            [
+                f"{index}. **[{risk}] {title}**",
+                f"   - 摘要：{summary}",
+                (
+                    f"   - 来源：{row.get('source_name') or '未知'}"
+                    f"｜证据：{evidence}｜{short_markdown_link(row.get('source_url'))}"
+                ),
+            ]
+        )
+    if len(rows) > 8:
+        lines.append(f"- 另有 {len(rows) - 8} 条已登记至统计表，本次不逐条展开。")
+    lines.extend(
+        [
+            "",
+            "#### 建议动作",
+            "- 优先复核红色及“待人工核实”条目；未完成证据核验前不得作为确证事实外传。",
+            "- 继续关注主流媒体、监管机构及社交平台是否出现新的独立信号。",
+        ]
     )
     return {
-        "title": "OCOOPA 召回舆情补充登记",
-        "text": text,
+        "title": f"OCOOPA 召回舆情总览（新增 {len(rows)} 条）",
+        "text": "\n".join(lines),
         "suppress_at": True,
-        "needs_human_review": bool(row.get("needs_human_review")),
+        "needs_human_review": needs_review > 0,
+        "_recall_record_ids": [int(row["recall_record_id"]) for row in rows],
     }
+
+
+def _compact(value: object, limit: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _risk_label(value: object) -> str:
+    return {
+        "red": "红色",
+        "yellow": "黄色",
+        "green": "绿色",
+        "unrated": "未分级",
+    }.get(str(value or "unrated").lower(), "未分级")
+
+
+def _source_label(value: object) -> str:
+    return {
+        "news": "新闻",
+        "social": "社交平台",
+        "cpsc": "监管机构",
+        "legal": "法律信息",
+        "search": "网页搜索",
+        "group": "群内同步",
+        "unknown": "其他",
+    }.get(str(value or "unknown").lower(), _compact(value, 24) or "其他")
