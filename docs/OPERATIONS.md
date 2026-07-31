@@ -107,11 +107,11 @@ python -m ocoopa_monitor.cli recall sync --limit 10             # 队列补发/�
 
 同一个 web 服务还提供给法务/PR/高层看的只读控制台(同样用 `OCOOPA_REVIEW_TOKEN` 鉴权):
 
-- **看板** `GET /dashboard?token=xxx&days=30`:近 N 天提及总数、实时告警数、风险/情感/来源分布、近期红/黄风险列表(带原文链接)。
+- **分析看板** `GET /review/analysis?token=xxx&days=30`:近 N 个北京时间自然日的每日新增/红黄风险走线、关键词与议题归纳、情感/来源结构、管理摘要和规则化下一步建议。复核页顶部可直接切换进入；旧地址 `/dashboard` 保持兼容。
 - **检索** `GET /console/search?token=xxx&q=<关键词>&risk=<red|yellow|green>&days=30`:按关键词/风险等级过滤,看标题、来源、摘要、链接。
 - **导出 CSV** `GET /console/export.csv?token=xxx&days=30`:导出该时间窗内全部提及(含风险/情感/分类/摘要/证据状态),给法务做可追溯报告。
 
-> 控制台是只读聚合,不改数据;反馈仍在 `/review` 或 CLI 进行。`days` 默认 30,可调。
+> 控制台是只读聚合,不改数据;反馈仍在 `/review` 或 CLI 进行。`days` 默认 30,可调。分析结论只基于当前收录、机器分类和证据状态，不替代法务事实认定；当日数据为截至访问时的部分数据。
 
 ## 5. 已知边界 / 待补
 

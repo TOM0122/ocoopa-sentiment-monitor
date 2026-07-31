@@ -824,6 +824,23 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def fetch_alerts_between(self, start_at: datetime, end_at: datetime) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.id AS alert_id, a.risk_level, a.needs_human_review, a.ack_status,
+                       a.sent_at, a.created_at, m.event_fingerprint, m.title, m.source_url,
+                       g.status AS incident_status, g.muted_until
+                FROM alerts a
+                JOIN mentions m ON m.id=a.mention_id
+                LEFT JOIN incident_groups g ON g.fingerprint=m.event_fingerprint
+                WHERE a.created_at >= ? AND a.created_at < ?
+                ORDER BY a.created_at DESC, a.id DESC
+                """,
+                (dt_to_str(start_at), dt_to_str(end_at)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     # --- Tier 2 cross-source alert cooldown ---
     def get_topic_alert(self, topic_key: str) -> Optional[Dict[str, Any]]:
         with self.connect() as conn:
@@ -1745,6 +1762,23 @@ class PostgresDatabase:
                 LIMIT %s
                 """,
                 (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_alerts_between(self, start_at: datetime, end_at: datetime) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.id AS alert_id, a.risk_level, a.needs_human_review, a.ack_status,
+                       a.sent_at, a.created_at, m.event_fingerprint, m.title, m.source_url,
+                       g.status AS incident_status, g.muted_until
+                FROM alerts a
+                JOIN mentions m ON m.id=a.mention_id
+                LEFT JOIN incident_groups g ON g.fingerprint=m.event_fingerprint
+                WHERE a.created_at >= %s AND a.created_at < %s
+                ORDER BY a.created_at DESC, a.id DESC
+                """,
+                (start_at, end_at),
             ).fetchall()
         return [dict(row) for row in rows]
 
