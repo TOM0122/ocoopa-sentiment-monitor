@@ -1,24 +1,30 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from html import escape
 import hmac
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
-from .db import REVIEW_STATUSES
+from .db import REVIEW_STATUSES, str_to_dt
 from .models import utcnow
 
 # Review operates on INCIDENTS (event_fingerprint), not on alerts: every
 # red/yellow event is reviewable here, including ones absorbed silently during
 # cold-start backfill that never produced a real-time alert.
 
-# Buttons offered per incident row: (review status, label, mute-days).
 _ACTIONS = [
-    ("confirmed", "确认", None),
-    ("false_positive", "误报", None),
-    ("muted", "静音7天", 7),
+    ("confirmed", "确认并跟进", None, "确认后保留后续同事件告警，并结束当前待处理升级。"),
+    ("false_positive", "标记误报", None, "标记为误报后会永久抑制该事件的后续告警。"),
+    ("muted", "静音 7 天", 7, "静音后会在未来 7 天内临时抑制该事件告警。"),
 ]
+
+_STATUS_META = {
+    "active": ("待处理", "pending"),
+    "monitoring": ("已确认跟进", "monitoring"),
+    "resolved": ("已标记误报", "resolved"),
+    "muted": ("已静音", "muted"),
+}
 
 
 def token_ok(configured: str, provided: str) -> bool:
@@ -37,41 +43,173 @@ def _mark_url(incident_id: int, status: str, days: Optional[int], token: str) ->
     return "/review/mark?" + urlencode(params)
 
 
-def render_review_page(incidents: List[Dict[str, Any]], token: str = "") -> str:
-    rows: List[str] = []
-    for it in incidents:
-        handled = it.get("status") in {"resolved", "muted"}
-        review = " · <b>需人工核实</b>" if it.get("needs_human_review") else ""
-        status_note = f" · 已处理（{escape(str(it.get('status')))}）" if handled else ""
-        spread = f"{it.get('mention_count') or 1} 条 / {it.get('source_count') or 1} 源"
-        buttons = " ".join(
-            f'<form method="post" action="{_mark_url(it["incident_id"], status, days, token)}" '
-            f'style="display:inline">'
-            f'<button type="submit">{escape(label)}</button></form>'
-            for status, label, days in _ACTIONS
-        )
-        rows.append(
-            "<li>"
-            f'<b>[{escape(str(it.get("risk_level_max")))}]</b> '
-            f'{escape(str(it.get("title") or it.get("primary_topic") or ""))}'
-            f'{review}{status_note} <small>({spread})</small><br>'
-            f'{escape(str(it.get("summary_zh") or ""))}<br>'
-            f'<a href="{escape(str(it.get("source_url") or ""))}" target="_blank">'
-            f'{escape(str(it.get("source_url") or ""))}</a><br>'
-            f"{buttons}"
-            "</li>"
-        )
-    body = "<ul>" + "".join(rows) + "</ul>" if rows else "<p>暂无红/黄事件。</p>"
+def _safe_source_url(value: Any) -> str:
+    """Only render external source links for normal web URLs."""
+    url = str(value or "").strip()
+    return url if urlsplit(url).scheme in {"http", "https"} else ""
+
+
+def _status_meta(value: Any) -> Tuple[str, str]:
+    return _STATUS_META.get(str(value or ""), ("状态待核", "unknown"))
+
+
+def _mute_is_active(incident: Dict[str, Any]) -> bool:
+    """Treat expired or malformed time-bound mutes as work that needs review again."""
+    if str(incident.get("status") or "") != "muted":
+        return False
+    muted_until = incident.get("muted_until")
+    if not muted_until:
+        return True
+    try:
+        parsed = str_to_dt(str(muted_until))
+        if parsed and parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return bool(parsed and parsed > utcnow())
+    except (TypeError, ValueError):
+        return False
+
+
+def _incident_priority_key(incident: Dict[str, Any]) -> Tuple[int, int, int]:
+    status = str(incident.get("status") or "active")
+    handled = status in {"monitoring", "resolved"} or (status == "muted" and _mute_is_active(incident))
     return (
-        '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
+        1 if handled else 0,
+        0 if incident.get("needs_human_review") else 1,
+        0 if incident.get("risk_level_max") == "red" else 1,
+    )
+
+
+def _action_forms(incident_id: int, token: str, compact: bool) -> str:
+    forms: List[str] = []
+    for status, label, days, warning in _ACTIONS:
+        action = escape(_mark_url(incident_id, status, days, token), quote=True)
+        confirmation = escape(f"确定要{label}吗？{warning}", quote=True)
+        button_class = "review-action review-action--primary" if status == "confirmed" else "review-action"
+        forms.append(
+            f'<form method="post" action="{action}" class="review-action-form" '
+            f'onsubmit="return confirm(\'{confirmation}\')">'
+            f'<button class="{button_class}" type="submit">{escape(label)}</button></form>'
+        )
+    actions = "".join(forms)
+    if compact:
+        return (
+            '<details class="review-correction"><summary>更正复核结论</summary>'
+            f'<div class="review-actions">{actions}</div></details>'
+        )
+    return f'<div class="review-actions" aria-label="复核操作">{actions}</div>'
+
+
+def _render_incident(incident: Dict[str, Any], token: str) -> str:
+    risk = str(incident.get("risk_level_max") or "yellow")
+    risk_label = "红色风险" if risk == "red" else "黄色风险"
+    status_label, status_class = _status_meta(incident.get("status"))
+    if str(incident.get("status") or "") == "muted" and not _mute_is_active(incident):
+        status_label, status_class = "静音已到期", "pending"
+    handled = status_class in {"monitoring", "resolved", "muted"}
+    title = escape(str(incident.get("title") or incident.get("primary_topic") or "未命名事件"))
+    summary = escape(str(incident.get("summary_zh") or "暂无自动摘要，请查看原始来源后完成核实。"))
+    mention_count = int(incident.get("mention_count") or 1)
+    source_count = int(incident.get("source_count") or 1)
+    last_seen = escape(str(incident.get("last_seen_at") or "未知"))
+    source_url = _safe_source_url(incident.get("source_url"))
+    source = (
+        f'<a class="source-link" href="{escape(source_url, quote=True)}" target="_blank" '
+        'rel="noopener noreferrer">查看原始来源 <span aria-hidden="true">↗</span></a>'
+        if source_url
+        else '<span class="source-link source-link--unavailable">原始来源链接不可用</span>'
+    )
+    human_review = (
+        '<span class="flag flag--review">需人工核实</span>' if incident.get("needs_human_review") else ""
+    )
+    evidence = (
+        '<span class="flag flag--verified">证据已校验</span>'
+        if incident.get("evidence_check_passed")
+        else '<span class="flag flag--review">证据待复核</span>'
+    )
+    muted_note = ""
+    if str(incident.get("status") or "") == "muted" and incident.get("muted_until"):
+        mute_prefix = "静音至" if _mute_is_active(incident) else "静音已于"
+        muted_note = f'<span class="muted-note">{mute_prefix} {escape(str(incident["muted_until"]))}</span>'
+    actions = _action_forms(int(incident["incident_id"]), token, compact=handled)
+    return (
+        f'<article class="incident incident--{risk}" aria-label="{risk_label}：{title}">'
+        '<div class="incident-header">'
+        f'<span class="risk-badge risk-badge--{risk}">{risk_label}</span>'
+        f'<span class="status-badge status-badge--{status_class}">{status_label}</span>'
+        f'{human_review}{evidence}{muted_note}'
+        '</div>'
+        f'<h2>{title}</h2>'
+        f'<p class="incident-summary">{summary}</p>'
+        '<dl class="incident-meta">'
+        f'<div><dt>传播</dt><dd>{mention_count} 条提及，{source_count} 个来源</dd></div>'
+        f'<div><dt>最后出现</dt><dd><time>{last_seen}</time></dd></div>'
+        f'<div><dt>证据</dt><dd>{source}</dd></div>'
+        '</dl>'
+        f'{actions}'
+        '</article>'
+    )
+
+
+def render_review_page(incidents: List[Dict[str, Any]], token: str = "") -> str:
+    # Preserve newest-first order inside each operational priority band.
+    ordered = sorted(incidents, key=lambda it: str(it.get("last_seen_at") or ""), reverse=True)
+    ordered.sort(key=_incident_priority_key)
+    total = len(ordered)
+    red_count = sum(it.get("risk_level_max") == "red" for it in ordered)
+    human_count = sum(bool(it.get("needs_human_review")) for it in ordered)
+    pending_count = sum(
+        str(it.get("status") or "active") == "active"
+        or (str(it.get("status") or "") == "muted" and not _mute_is_active(it))
+        for it in ordered
+    )
+    rows = "".join(_render_incident(incident, token) for incident in ordered)
+    body = (
+        f'<section class="incident-list" aria-label="复核事件列表">{rows}</section>'
+        if rows
+        else (
+            '<section class="empty-state"><h2>暂无待复核事件</h2>'
+            '<p>当前范围内没有红色或黄色事件。新的高风险事件出现后会显示在这里。</p></section>'
+        )
+    )
+    return (
+        '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        "<title>Ocoopa 舆情复核</title>"
-        "<style>body{font-family:sans-serif;max-width:760px;margin:1rem auto;padding:0 1rem}"
-        "li{margin:0 0 1rem;padding:.6rem;border:1px solid #ddd;border-radius:6px;list-style:none}"
-        "button{margin-right:.4rem;padding:.3rem .7rem}ul{padding:0}small{color:#888}</style></head>"
-        "<body><h2>Ocoopa 舆情复核</h2>"
-        "<p>确认 / 误报 / 静音 —— 标记后该事件的后续实时告警会相应抑制。涵盖所有红/黄事件（含未触发实时告警的）。</p>"
-        f"{body}</body></html>"
+        '<meta name="color-scheme" content="light dark">'
+        '<title>OCOOPA 舆情复核</title>'
+        '<style>'
+        ':root{color-scheme:light dark;--canvas:#f4f7fb;--surface:#fff;--ink:#14213a;--muted:#5d6b82;'
+        '--line:#d9e1eb;--accent:#075985;--accent-strong:#0c4a6e;--soft:#e8f2f8;--shadow:0 12px 32px rgba(15,35,60,.08);'
+        '--red:#b42318;--red-soft:#fff1f0;--amber:#9a6700;--amber-soft:#fff8e8;--green:#1f6b49;--green-soft:#effaf4;'
+        '--radius:12px}*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);'
+        'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.5}.page{max-width:1120px;margin:0 auto;padding:32px 20px 56px}'
+        '.page-header{padding:8px 0 24px}.eyebrow{margin:0 0 7px;color:var(--accent);font-size:.78rem;font-weight:700;letter-spacing:.08em}'
+        'h1,h2,p{margin-top:0}h1{margin-bottom:8px;font-size:clamp(1.75rem,4vw,2.35rem);letter-spacing:-.03em;line-height:1.15}'
+        '.intro{max-width:760px;margin:0;color:var(--muted)}.overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:20px}'
+        '.metric{min-height:94px;padding:16px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:0 2px 8px rgba(15,35,60,.035)}'
+        '.metric b{display:block;font-size:1.75rem;line-height:1.05}.metric span{display:block;margin-top:7px;color:var(--muted);font-size:.86rem}.metric--attention{border-color:#f0c76a;background:var(--amber-soft)}'
+        '.metric--risk{border-color:#efb4ae;background:var(--red-soft)}.review-guidance{margin:0 0 22px;padding:14px 16px;border-left:4px solid var(--accent);background:var(--soft);color:#1c4863;font-size:.92rem}'
+        '.incident-list{display:grid;gap:14px}.incident{padding:20px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow)}'
+        '.incident--red{border-left:5px solid var(--red)}.incident--yellow{border-left:5px solid var(--amber)}.incident-header{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-bottom:11px}'
+        '.risk-badge,.status-badge,.flag,.muted-note{display:inline-flex;align-items:center;min-height:24px;padding:3px 8px;border-radius:999px;font-size:.78rem;font-weight:700}.risk-badge--red{color:#8a1c14;background:var(--red-soft)}'
+        '.risk-badge--yellow{color:#785300;background:var(--amber-soft)}.status-badge--pending,.flag--review{color:#875b00;background:var(--amber-soft)}.status-badge--monitoring,.flag--verified{color:#15533a;background:var(--green-soft)}'
+        '.status-badge--resolved{color:#4b5563;background:#edf0f4}.status-badge--muted{color:#5d4a7a;background:#f4f0fb}.status-badge--unknown{color:#475569;background:#eef2f6}.muted-note{color:#5d4a7a;background:#f4f0fb}'
+        '.incident h2{margin-bottom:8px;font-size:1.1rem;line-height:1.35}.incident-summary{margin-bottom:15px;color:#2f4058}.incident-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0 0 17px;padding:0}'
+        '.incident-meta div{min-width:0}.incident-meta dt{margin-bottom:3px;color:var(--muted);font-size:.75rem;font-weight:700}.incident-meta dd{margin:0;font-size:.9rem;overflow-wrap:anywhere}.source-link{color:var(--accent-strong);font-weight:700;text-underline-offset:3px}.source-link--unavailable{color:var(--muted);font-weight:400}'
+        '.review-actions{display:flex;flex-wrap:wrap;gap:8px}.review-action-form{margin:0}.review-action{min-height:36px;padding:7px 11px;border:1px solid #b8c5d3;border-radius:8px;background:var(--surface);color:var(--ink);font:inherit;font-size:.88rem;font-weight:700;cursor:pointer}'
+        '.review-action--primary{border-color:var(--accent);background:var(--accent);color:#fff}.review-action:hover{border-color:var(--accent)}.review-action--primary:hover{background:var(--accent-strong)}.review-action:active{transform:translateY(1px)}'
+        '.review-action:focus-visible,.source-link:focus-visible,summary:focus-visible{outline:3px solid #7dd3fc;outline-offset:2px}.review-correction{margin-top:3px}.review-correction summary{color:var(--muted);font-size:.88rem;cursor:pointer}.review-correction .review-actions{margin-top:11px}'
+        '.empty-state{padding:38px 24px;border:1px dashed #aab8c9;border-radius:var(--radius);background:var(--surface);text-align:center}.empty-state h2{font-size:1.2rem}.empty-state p{margin-bottom:0;color:var(--muted)}'
+        '@media (max-width:720px){.page{padding:24px 14px 40px}.overview{grid-template-columns:repeat(2,minmax(0,1fr))}.incident{padding:16px}.incident-meta{grid-template-columns:1fr;gap:9px}.review-action{width:100%}.review-action-form{flex:1 1 100%}}'
+        '@media (prefers-color-scheme:dark){:root{--canvas:#111a29;--surface:#172235;--ink:#eff6ff;--muted:#b1c0d3;--line:#34455e;--accent:#7dd3fc;--accent-strong:#bae6fd;--soft:#12324a;--shadow:0 12px 32px rgba(0,0,0,.2);--red:#ffb4ac;--red-soft:#482523;--amber:#ffd68a;--amber-soft:#423313;--green:#a4e2c0;--green-soft:#173a2b}.intro,.incident-summary{color:var(--muted)}.review-guidance{color:#c8eafa}.source-link{color:var(--accent)}.review-action{background:#172235;color:var(--ink);border-color:#52657c}.review-action--primary{background:#7dd3fc;border-color:#7dd3fc;color:#082f49}.review-action--primary:hover{background:#bae6fd}}'
+        '</style></head><body><main class="page"><header class="page-header"><p class="eyebrow">OCOOPA / 召回复核工作台</p>'
+        '<h1>先处理需要判断的事件</h1><p class="intro">红色和黄色事件按待办优先级排列。请先核对原始来源，再记录结论。</p></header>'
+        '<section class="overview" aria-label="本页风险概览">'
+        f'<div class="metric"><b>{total}</b><span>本页红黄事件</span></div>'
+        f'<div class="metric metric--risk"><b>{red_count}</b><span>红色风险</span></div>'
+        f'<div class="metric metric--attention"><b>{human_count}</b><span>需人工核实</span></div>'
+        f'<div class="metric"><b>{pending_count}</b><span>待处理</span></div></section>'
+        '<p class="review-guidance"><strong>操作影响：</strong>确认并跟进会结束当前待处理升级，但保留后续同事件告警；标记误报会永久抑制；静音 7 天为临时抑制。每次操作均需再次确认。</p>'
+        f'{body}</main></body></html>'
     )
 
 
@@ -99,10 +237,13 @@ def apply_mark(
 
 def render_result(ok: bool, message: str, token: str = "") -> str:
     back = "/review" + (f"?{urlencode({'token': token})}" if token else "")
-    color = "#0a0" if ok else "#a00"
+    result_class = "result--success" if ok else "result--error"
+    title = "复核结论已记录" if ok else "未能记录复核结论"
     return (
-        '<!doctype html><html lang="zh"><head><meta charset="utf-8">'
-        "<title>已处理</title></head><body style=\"font-family:sans-serif;max-width:600px;margin:2rem auto\">"
-        f'<p style="color:{color}">{escape(message)}</p>'
-        f'<p><a href="{escape(back)}">← 返回复核列表</a></p></body></html>'
+        '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1"><title>OCOOPA 舆情复核</title>'
+        '<style>body{margin:0;padding:24px;background:#f4f7fb;color:#14213a;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.result{max-width:620px;margin:8vh auto;padding:28px;border:1px solid #d9e1eb;border-radius:12px;background:#fff;box-shadow:0 12px 32px rgba(15,35,60,.08)}.result--success{border-left:5px solid #1f6b49}.result--error{border-left:5px solid #b42318}h1{margin-top:0;font-size:1.45rem}p{line-height:1.6}a{color:#075985;font-weight:700;text-underline-offset:3px}@media (prefers-color-scheme:dark){body{background:#111a29;color:#eff6ff}.result{border-color:#34455e;background:#172235}a{color:#7dd3fc}}</style>'
+        '</head><body><main class="result ' + result_class + '"><h1>' + title + '</h1>'
+        f'<p aria-live="polite">{escape(message)}</p><p><a href="{escape(back, quote=True)}">返回复核列表</a></p>'
+        '</main></body></html>'
     )
