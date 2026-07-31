@@ -21,6 +21,8 @@ def run_doctor(settings, production: bool = False) -> DoctorReport:
 
     if production and not settings.db_url:
         errors.append("Production must use Railway PostgreSQL via OCOOPA_DB_URL or DATABASE_URL.")
+    if production and not settings.review_token:
+        errors.append("Production web service requires OCOOPA_REVIEW_TOKEN.")
 
     if settings.llm_provider == "deepseek":
         if not settings.llm_api_key:

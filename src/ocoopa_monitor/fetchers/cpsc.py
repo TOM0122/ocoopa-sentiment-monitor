@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Iterable, List, Optional
-from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -40,20 +39,8 @@ class CPSCRecallFetcher(Fetcher):
         sep = "&" if "?" in source.url else "?"
         url = f"{source.url}{sep}{urlencode({'ProductName': term})}"
         request = Request(url, headers={"User-Agent": "OcoopaMonitor/0.1 (+internal compliance monitoring)"})
-        try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
-                payload = response.read().decode("utf-8")
-        except URLError:
-            if url.startswith("https://"):
-                fallback = "http://" + url[len("https://") :]
-                request = Request(
-                    fallback,
-                    headers={"User-Agent": "OcoopaMonitor/0.1 (+internal compliance monitoring)"},
-                )
-                with urlopen(request, timeout=self.timeout_seconds) as response:
-                    payload = response.read().decode("utf-8")
-            else:
-                raise
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            payload = response.read().decode("utf-8")
         data = json.loads(payload)
         if isinstance(data, dict):
             records = data.get("Recalls") or data.get("recalls") or data.get("results") or []

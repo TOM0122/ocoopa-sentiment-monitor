@@ -80,7 +80,16 @@ class DingTalkRobotChannel(DeliveryChannel):
             method="POST",
         )
         with urlopen(request, timeout=self.timeout_seconds) as response:
-            response.read()
+            raw_response = response.read()
+        try:
+            result = json.loads(raw_response.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("DingTalk returned a non-JSON response") from exc
+        if int(result.get("errcode", -1)) != 0:
+            raise RuntimeError(
+                f"DingTalk rejected message: errcode={result.get('errcode')} "
+                f"errmsg={result.get('errmsg', '')}"
+            )
         self._sent_timestamps.append(time.time())
         return self.webhook_url
 

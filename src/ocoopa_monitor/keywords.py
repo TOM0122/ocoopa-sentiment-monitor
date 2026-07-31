@@ -38,6 +38,17 @@ DEFAULT_KEYWORDS: List[Keyword] = [
     Keyword("Ocoopa 暖手宝 爆炸", "incident", "high"),
     Keyword("充电暖手宝 致死", "category", "regular"),
     Keyword("暖手宝 起火 死亡", "category", "regular"),
+    # CPSC recall 26-659 (published 2026-07-30). Exact model and recall
+    # identifiers improve discovery of posts that omit the brand in snippets.
+    Keyword("OCOOPA 26-659", "recall_campaign", "high"),
+    Keyword("OCOOPA UT3053 recall", "recall_campaign", "high"),
+    Keyword("OCOOPA UT3056 recall", "recall_campaign", "high"),
+    Keyword("OCOOPA ZLS-118 recall", "recall_campaign", "high"),
+    Keyword("OCOOPA ZLS-118S recall", "recall_campaign", "high"),
+    Keyword("OCOOPA ZLS-118D recall", "recall_campaign", "high"),
+    Keyword("OCOOPA H01 recall", "recall_campaign", "high"),
+    Keyword("OCOOPA H01 PD recall", "recall_campaign", "high"),
+    Keyword("Shenzhen Street Cat Technology recall", "recall_campaign", "high"),
 ]
 
 

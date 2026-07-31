@@ -12,6 +12,9 @@ from .models import utcnow
 from .doctor import run_doctor
 from .keywords import DEFAULT_KEYWORDS
 from .pipeline import MonitorPipeline
+from .outbox import DeliveryOutboxWorker
+from .delivery import DeliveryClient
+from .recall import RecallRegistryService
 from .reports import DailyReportService
 from .source_health import SourceHealthMonitor
 from .sources import DEFAULT_SOURCES
@@ -48,6 +51,10 @@ def main() -> None:
     keyword.add_argument("term", nargs="?")
     keyword.add_argument("--category", default="custom")
     keyword.add_argument("--lane", choices=["high", "regular"], default="high")
+    recall = sub.add_parser("recall")
+    recall.add_argument("action", choices=["list", "export", "import-group", "sync"])
+    recall.add_argument("path", nargs="?")
+    recall.add_argument("--limit", type=int, default=500)
 
     args = parser.parse_args()
     settings = load_settings()
@@ -73,7 +80,6 @@ def main() -> None:
         days = args.days or settings.backfill_days
         pipeline = MonitorPipeline(db, settings)
         result = pipeline.run_lane("high", backfill=True, since_days=days)
-        db.mark_bootstrapped()
         print_json(result)
         return
     if args.command == "bootstrap":
@@ -169,6 +175,29 @@ def main() -> None:
             print(f"keyword not found: {args.term}")
             sys.exit(1)
         print_json({"term": args.term, "active": args.action == "enable"})
+        return
+    if args.command == "recall":
+        db.init()
+        pipeline = MonitorPipeline(db, settings)
+        service = RecallRegistryService(db, pipeline)
+        if args.action == "list":
+            print_json({"records": db.list_recall_mentions(max(1, min(args.limit, 5000)))})
+            return
+        if args.action == "sync":
+            queued = service.queue_pending(min(max(args.limit, 1), 20))
+            result = DeliveryOutboxWorker(db, DeliveryClient.from_settings(settings)).drain(
+                min(max(args.limit, 1), 20)
+            )
+            print_json({"queued": queued, **result})
+            return
+        if not args.path:
+            print(f"usage: recall {args.action} <path>")
+            sys.exit(1)
+        if args.action == "import-group":
+            print_json(service.import_group(args.path))
+            return
+        count = service.export_csv(args.path, max(1, min(args.limit, 5000)))
+        print_json({"exported": count, "path": args.path})
         return
     if args.command == "doctor":
         report = run_doctor(settings, production=args.production)

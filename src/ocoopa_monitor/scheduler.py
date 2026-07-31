@@ -5,12 +5,15 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from .config import Settings
 from .db import Database
 from .delivery import DeliveryClient
 from .pipeline import MonitorPipeline
+from .outbox import DeliveryOutboxWorker
 from .reports import DailyReportService
+from .recall import RecallRegistryService
 from .source_health import SourceHealthMonitor
 
 LOGGER = logging.getLogger(__name__)
@@ -40,7 +43,10 @@ class SimpleScheduler:
         LOGGER.info("starting scheduler")
         self._ensure_bootstrap()
         while True:
-            self.tick()
+            try:
+                self.tick()
+            except Exception:
+                LOGGER.exception("scheduler tick failed; loop will continue")
             time.sleep(poll_seconds)
 
     def _ensure_bootstrap(self) -> None:
@@ -58,13 +64,24 @@ class SimpleScheduler:
             "cold start detected: running silent backfill (%s days) before real-time alerts",
             self.settings.backfill_days,
         )
-        pipeline = MonitorPipeline(self.db, self.settings)
+        pipeline = MonitorPipeline(self.db, self.settings, delivery_client=self.delivery)
         stats = pipeline.bootstrap(self.settings.backfill_days)
         LOGGER.info("bootstrap complete: %s; real-time alerts enabled", stats)
 
     def tick(self) -> None:
         now = datetime.now(timezone.utc)
-        pipeline = MonitorPipeline(self.db, self.settings)
+        pipeline = MonitorPipeline(self.db, self.settings, delivery_client=self.delivery)
+        recall_service = RecallRegistryService(self.db, pipeline)
+        if not self.db.get_state("recall_registry_backfill_v1"):
+            result = recall_service.backfill_existing(assume_group_reported=True)
+            self.db.set_state("recall_registry_backfill_v1", now.isoformat())
+            LOGGER.info("recall registry rollout backfill=%s", result)
+        queued = recall_service.queue_pending(10)
+        if queued:
+            LOGGER.info("queued %s pending recall mentions for group sync", queued)
+        delivery_stats = DeliveryOutboxWorker(self.db, self.delivery).drain()
+        if delivery_stats["attempted"]:
+            LOGGER.info("delivery outbox result=%s", delivery_stats)
         if self._due(self.state.last_high_run, self.settings.high_lane_interval_minutes, now):
             LOGGER.info("running high-sensitivity lane")
             LOGGER.info("high lane result=%s", pipeline.run_lane("high"))
@@ -76,6 +93,7 @@ class SimpleScheduler:
         self._maybe_health_check(now)
         self._maybe_escalate_unacked(now)
         self._maybe_daily_report(now)
+        self.db.set_state("scheduler_heartbeat_at", now.isoformat())
 
     def _maybe_escalate_unacked(self, now: datetime) -> None:
         """Re-page the on-call once for any red alert left unacked past the timeout.
@@ -103,13 +121,21 @@ class SimpleScheduler:
         LOGGER.warning("escalated unacked red alerts: %s", [a["alert_id"] for a in pending])
 
     def _maybe_daily_report(self, now: datetime) -> None:
-        # Beijing 09:00 is 01:00 UTC. This keeps the scheduler dependency-free.
-        report_date = now.date().isoformat()
-        if now.hour == 1 and now.minute < 10 and self.state.last_daily_report_date != report_date:
-            LOGGER.info("generating + delivering daily report")
-            report = DailyReportService(self.db, self.delivery).generate("Asia/Shanghai")
-            LOGGER.info("daily report delivery_status=%s", report.get("delivery_status"))
-            self.state.last_daily_report_date = report_date
+        local_now = now.astimezone(ZoneInfo("Asia/Shanghai"))
+        if local_now.hour < 9:
+            return
+        report_date = local_now.date().isoformat()
+        persisted = self.db.get_state("last_daily_report_date")
+        if self.state.last_daily_report_date == report_date or persisted == report_date:
+            return
+        LOGGER.info("generating + delivering daily report")
+        report = DailyReportService(self.db, self.delivery).generate("Asia/Shanghai")
+        LOGGER.info("daily report delivery_status=%s", report.get("delivery_status"))
+        if report.get("delivery_status") == "failed":
+            LOGGER.warning("daily report delivery failed; scheduler will retry")
+            return
+        self.state.last_daily_report_date = report_date
+        self.db.set_state("last_daily_report_date", report_date)
 
     def _maybe_health_check(self, now: datetime) -> None:
         if not self._due(self.state.last_health_run, HEALTH_CHECK_INTERVAL_MINUTES, now):
@@ -145,4 +171,3 @@ class SimpleScheduler:
         if last_run is None:
             return True
         return (now - last_run).total_seconds() >= interval_minutes * 60
-

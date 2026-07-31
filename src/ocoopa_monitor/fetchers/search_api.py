@@ -10,9 +10,15 @@ from ..models import RawItem, SourceConfig
 from ..normalize import normalize_text
 from .base import Fetcher
 
-HIGH_SENSITIVITY_QUERY = 'Ocoopa (fire OR death OR lawsuit OR recall OR CPSC OR "class action")'
+HIGH_SENSITIVITY_QUERY = (
+    '("OCOOPA" OR "Shenzhen Street Cat Technology") '
+    '(fire OR death OR lawsuit OR recall OR CPSC OR "class action" OR "26-659" '
+    'OR UT3053 OR UT3056 OR "ZLS-118" OR H01)'
+)
 REGULAR_QUERY = (
-    '(("Ocoopa" OR "Ocopa") (fire OR death OR lawsuit OR recall OR burn OR overheat)) '
+    '(("Ocoopa" OR "Ocopa" OR "Shenzhen Street Cat Technology") '
+    '(fire OR death OR lawsuit OR recall OR burn OR overheat OR "26-659" '
+    'OR UT3053 OR UT3056 OR "ZLS-118" OR H01)) '
     'OR ("hand warmer" (fire OR death OR recall OR lawsuit))'
 )
 
