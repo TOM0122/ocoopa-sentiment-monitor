@@ -19,7 +19,7 @@ from .fetchers import (
 from .llm import RuleOnlyProvider, provider_from_settings
 from .models import Mention, RawItem, SourceConfig, utcnow
 from .outbox import DeliveryOutboxWorker
-from .recall import is_current_recall, recall_update_payload
+from .recall import RecallRegistryService, is_current_recall
 from .normalize import (
     canonicalize_url,
     content_hash,
@@ -117,13 +117,11 @@ class MonitorPipeline:
                     self.db.insert_analysis(analysis)
                     incident_group_id = self.db.upsert_incident_group(stored, analysis)
                     stats["mentions_processed"] += 1
-                    recall_record_id = None
                     if is_current_recall(stored.title, stored.raw_text):
-                        recall_record_id = self.db.upsert_recall_mention(stored.id)
+                        self.db.upsert_recall_mention(stored.id)
                         stats["recall_mentions_registered"] += 1
                     if self._is_red_escalation(analysis) and not realtime_enabled:
                         stats["alerts_suppressed_pre_bootstrap"] += 1
-                    alert_created = False
                     if self._should_alert(stored, analysis, backfill, realtime_enabled):
                         if self.db.is_incident_suppressed(stored.event_fingerprint):
                             # Human marked this incident false-positive or muted.
@@ -134,22 +132,14 @@ class MonitorPipeline:
                             stats["alerts_suppressed_cooldown"] += 1
                         elif self._create_alert(stored, analysis, incident_group_id):
                             stats["alerts_created"] += 1
-                            alert_created = True
-                    if recall_record_id and realtime_enabled and not alert_created:
-                        queued = self.db.enqueue_delivery(
-                            kind="recall_update",
-                            dedupe_key=f"recall:{stored.id}",
-                            entity_type="recall_mention",
-                            entity_id=recall_record_id,
-                            payload=recall_update_payload(stored, analysis),
-                        )
-                        stats["recall_updates_queued"] += int(queued)
                 self.db.record_source_success(source)
             except Exception as exc:
                 stats["sources_failed"] += 1
                 if source.priority == "P0":
                     stats["p0_sources_failed"] += 1
                 self.db.record_source_failure(source, str(exc))
+        if realtime_enabled:
+            stats["recall_updates_queued"] = RecallRegistryService(self.db, self).queue_pending(20)
         delivery_stats = DeliveryOutboxWorker(self.db, self.delivery_client).drain()
         stats["deliveries_sent"] = delivery_stats["sent"]
         stats["deliveries_failed"] = delivery_stats["failed"]

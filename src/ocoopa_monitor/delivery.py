@@ -8,8 +8,17 @@ import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Dict, List, Optional
-from urllib.parse import quote_plus, urlencode
+from urllib.parse import quote, quote_plus, urlencode
 from urllib.request import Request, urlopen
+
+
+def short_markdown_link(value: object) -> str:
+    """Render a safe, compact visible label for an external HTTP(S) URL."""
+    url = str(value or "").strip()
+    if not url.startswith(("https://", "http://")):
+        return "无公开链接"
+    encoded = quote(url, safe=":/?#[]@!$&'+,;=%")
+    return f"[链接]({encoded})"
 
 
 class DeliveryChannel(ABC):
@@ -165,7 +174,7 @@ class DeliveryClient:
         text = (
             f"### {prefix}\n\n"
             f"- 标题：{title}\n"
-            f"- 原文 URL：{url}\n"
+            f"- 原文：{short_markdown_link(url)}\n"
             f"- 风险原因：{reason}\n"
             f"- 证据状态：{evidence_note}\n"
             f"- 置信度：{confidence:.2f}\n"

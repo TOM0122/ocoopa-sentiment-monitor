@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from .config import Settings
 from .db import Database
-from .delivery import DeliveryClient
+from .delivery import DeliveryClient, short_markdown_link
 from .pipeline import MonitorPipeline
 from .outbox import DeliveryOutboxWorker
 from .reports import DailyReportService
@@ -110,7 +110,10 @@ class SimpleScheduler:
             "",
         ]
         for a in pending:
-            lines.append(f"- #{a['alert_id']} {a.get('title')}\n  {a.get('source_url')}")
+            lines.append(
+                f"- #{a['alert_id']} {a.get('title')}\n"
+                f"  原文：{short_markdown_link(a.get('source_url'))}"
+            )
         try:
             self.delivery.send_text("Ocoopa 红色告警未处理升级", "\n".join(lines), suppress_at=False)
         except Exception:

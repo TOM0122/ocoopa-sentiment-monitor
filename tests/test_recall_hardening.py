@@ -15,7 +15,8 @@ from ocoopa_monitor.models import AnalysisResult, Mention, RawItem, SourceConfig
 from ocoopa_monitor.normalize import topic_key
 from ocoopa_monitor.outbox import DeliveryOutboxWorker
 from ocoopa_monitor.pipeline import MonitorPipeline
-from ocoopa_monitor.recall import RecallRegistryService, is_current_recall
+from ocoopa_monitor.recall import RecallRegistryService, is_current_recall, recall_digest_payload
+from ocoopa_monitor.reports import DailyReportService
 
 
 def settings(db_path: str) -> Settings:
@@ -65,6 +66,37 @@ class FlakyChannel:
         if self.calls == 1:
             raise RuntimeError("temporary webhook failure")
         return "test://delivered"
+
+
+class CapturingChannel:
+    def __init__(self):
+        self.payloads = []
+
+    def send_alert(self, payload):
+        self.payloads.append(payload)
+        return "test://delivered"
+
+
+class RoutineRecallAnalysisService:
+    def analyze(self, mention):
+        return AnalysisResult(
+            mention_id=mention.id,
+            model_provider="test",
+            model_name="routine-recall",
+            prompt_version="test",
+            sentiment="negative",
+            risk_level="yellow",
+            category="recall",
+            summary_zh=f"召回传播跟踪：{mention.title}",
+            key_quotes=[],
+            key_quote_offsets=[],
+            requires_escalation=False,
+            escalation_reason="",
+            confidence=0.91,
+            evidence_check_passed=True,
+            evidence_check_notes="test",
+            needs_human_review=False,
+        )
 
 
 class DowngradingProvider:
@@ -171,8 +203,13 @@ class RecallHardeningTests(unittest.TestCase):
         with db.connect() as conn:
             alert = conn.execute("SELECT sent_at FROM alerts").fetchone()
             count = conn.execute("SELECT COUNT(*) AS n FROM alerts").fetchone()["n"]
+            kinds = [
+                row["kind"]
+                for row in conn.execute("SELECT kind FROM delivery_outbox ORDER BY id").fetchall()
+            ]
         self.assertIsNotNone(alert["sent_at"])
         self.assertEqual(count, 1)
+        self.assertEqual(kinds, ["red_alert"])
 
     def test_recall_registry_tracks_and_exports_new_external_item(self):
         db, tmp = self.make_db()
@@ -189,6 +226,182 @@ class RecallHardeningTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".csv") as output:
             count = RecallRegistryService(db, pipeline).export_csv(output.name)
             self.assertEqual(count, 1)
+
+    def test_routine_recall_items_are_delivered_as_one_summary_and_marked_synced(self):
+        db, tmp = self.make_db()
+        items = [
+            self.recall_item("https://example.com/recall?article=1&tracking=very-long"),
+            RawItem(
+                source_type="social",
+                source_name="test_high",
+                source_url="https://example.com/recall?article=2&tracking=very-long",
+                title="OCOOPA recall 26-659 discussion covers model UT3056",
+                raw_text="Discussion of the CPSC fire and burn hazard recall for OCOOPA UT3056.",
+                published_at=utcnow(),
+            ),
+        ]
+        channel = CapturingChannel()
+        pipeline = MonitorPipeline(
+            db,
+            settings(tmp.name),
+            analysis_service=RoutineRecallAnalysisService(),
+            delivery_client=DeliveryClient(channel),
+            fetchers={"static": StaticFetcher(items)},
+        )
+
+        result = pipeline.run_lane("high")
+
+        self.assertEqual(result["recall_updates_queued"], 2)
+        self.assertEqual(len(channel.payloads), 1)
+        payload = channel.payloads[0]
+        self.assertNotIn("_recall_record_ids", payload)
+        self.assertIn("#### 总览", payload["text"])
+        self.assertIn("#### 核心结论", payload["text"])
+        self.assertIn("[链接](https://example.com/", payload["text"])
+        self.assertNotIn("原文：https://", payload["text"])
+        self.assertLess(len(payload["text"]), 8000)
+        self.assertTrue(all(row["sync_status"] == "synced" for row in db.list_recall_mentions()))
+        with db.connect() as conn:
+            jobs = conn.execute(
+                "SELECT kind, status FROM delivery_outbox ORDER BY id"
+            ).fetchall()
+        self.assertEqual([(row["kind"], row["status"]) for row in jobs], [("recall_digest", "sent")])
+
+    def test_pending_digest_is_not_duplicated_and_syncs_only_after_success(self):
+        db, tmp = self.make_db()
+        channel = FlakyChannel()
+        pipeline = MonitorPipeline(
+            db,
+            settings(tmp.name),
+            analysis_service=RoutineRecallAnalysisService(),
+            delivery_client=DeliveryClient(channel),
+            fetchers={"static": StaticFetcher([self.recall_item()])},
+        )
+        first = pipeline.run_lane("high")
+        self.assertEqual(first["deliveries_failed"], 1)
+        self.assertEqual(db.list_recall_mentions()[0]["sync_status"], "pending")
+        service = RecallRegistryService(db, pipeline)
+        self.assertEqual(service.queue_pending(), 0)
+        with db.connect() as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM delivery_outbox WHERE kind='recall_digest'"
+                ).fetchone()["n"],
+                1,
+            )
+            conn.execute(
+                "UPDATE delivery_outbox SET next_attempt_at=?",
+                ((utcnow() - timedelta(seconds=1)).isoformat(),),
+            )
+        self.assertEqual(DeliveryOutboxWorker(db, DeliveryClient(channel)).drain()["sent"], 1)
+        self.assertEqual(db.list_recall_mentions()[0]["sync_status"], "synced")
+
+    def test_legacy_single_item_jobs_are_superseded_into_summary(self):
+        db, tmp = self.make_db()
+        pipeline = MonitorPipeline(
+            db,
+            settings(tmp.name),
+            fetchers={"static": StaticFetcher([self.recall_item()])},
+        )
+        pipeline.run_lane("high", backfill=True)
+        row = db.list_recall_mentions()[0]
+        with db.connect() as conn:
+            conn.execute("UPDATE mentions SET backfill=0 WHERE id=?", (row["mention_id"],))
+        db.enqueue_delivery(
+            kind="recall_update",
+            dedupe_key="legacy-recall-item",
+            entity_type="recall_mention",
+            entity_id=row["recall_record_id"],
+            payload={"title": "旧单条", "text": "旧单条内容"},
+        )
+
+        queued = RecallRegistryService(db, pipeline).queue_pending()
+
+        self.assertEqual(queued, 1)
+        with db.connect() as conn:
+            jobs = conn.execute(
+                "SELECT kind, status FROM delivery_outbox ORDER BY id"
+            ).fetchall()
+        self.assertEqual(
+            [(job["kind"], job["status"]) for job in jobs],
+            [("recall_update", "superseded"), ("recall_digest", "pending")],
+        )
+
+    def test_backfill_recall_is_not_replayed_in_digest(self):
+        db, tmp = self.make_db()
+        pipeline = MonitorPipeline(
+            db,
+            settings(tmp.name),
+            fetchers={"static": StaticFetcher([self.recall_item()])},
+        )
+        pipeline.run_lane("high", backfill=True)
+        self.assertEqual(RecallRegistryService(db, pipeline).queue_pending(), 0)
+
+    def test_human_suppressed_recall_is_not_reintroduced_by_digest(self):
+        db, tmp = self.make_db()
+        pipeline = MonitorPipeline(
+            db,
+            settings(tmp.name),
+            fetchers={"static": StaticFetcher([self.recall_item()])},
+        )
+        pipeline.run_lane("high", backfill=True)
+        row = db.list_recall_mentions()[0]
+        with db.connect() as conn:
+            conn.execute("UPDATE mentions SET backfill=0 WHERE id=?", (row["mention_id"],))
+        self.assertTrue(db.review_incident(row["event_fingerprint"], "false_positive", None))
+        self.assertEqual(RecallRegistryService(db, pipeline).queue_pending(), 0)
+
+    def test_digest_and_daily_report_use_summary_template_and_short_link_label(self):
+        url = "https://example.com/a/very/long/path?with=many&query=parameters"
+        row = {
+            "recall_record_id": 1,
+            "risk_level": "yellow",
+            "source_type": "news",
+            "source_name": "Example News",
+            "title": "OCOOPA recall coverage",
+            "summary_zh": "召回报道摘要",
+            "source_url": url,
+            "needs_human_review": False,
+        }
+        digest = recall_digest_payload([row])["text"]
+        daily = DailyReportService._render(
+            report_date="2026-07-31",
+            total=1,
+            new_mentions=1,
+            backfill_mentions=0,
+            sentiment={"negative": 1},
+            sources={"Example News": 1},
+            risks={"yellow": 1},
+            top_risks=[
+                {
+                    "title": row["title"],
+                    "source": row["source_name"],
+                    "url": url,
+                    "risk_level": "yellow",
+                    "summary_zh": row["summary_zh"],
+                    "evidence_check_passed": True,
+                    "needs_human_review": False,
+                }
+            ],
+            recommended_actions=["继续监控。"],
+        )
+        for text in (digest, daily):
+            self.assertIn("#### 总览", text)
+            self.assertIn("#### 核心结论", text)
+            self.assertIn(f"[链接]({url})", text)
+            self.assertNotIn(f"来源：{url}", text)
+        alert = DeliveryClient(CapturingChannel()).alert_payload(
+            title="OCOOPA recall",
+            url=url,
+            risk_level="red",
+            reason="test",
+            confidence=0.9,
+            evidence_check_passed=True,
+            needs_human_review=False,
+            sent_at=utcnow(),
+        )
+        self.assertIn(f"原文：[链接]({url})", alert["text"])
+        self.assertNotIn(f"原文：{url}", alert["text"])
 
     def test_group_import_is_registered_as_already_synced(self):
         db, tmp = self.make_db()

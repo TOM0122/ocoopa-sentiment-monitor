@@ -22,7 +22,9 @@ class DeliveryOutboxWorker:
         for job in self.db.list_due_deliveries(limit):
             stats["attempted"] += 1
             try:
-                sent_to = self.delivery.send_alert(job["payload"])
+                public_payload = dict(job["payload"])
+                public_payload.pop("_recall_record_ids", None)
+                sent_to = self.delivery.send_alert(public_payload)
                 if not sent_to:
                     raise RuntimeError("delivery channel is not configured")
                 sent_at = utcnow()

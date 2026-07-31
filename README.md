@@ -12,7 +12,7 @@ The core pipeline runs on the Python standard library; the web console/review UI
 - conservative URL/content/event dedupe + cross-source topic cooldown (one page per event)
 - rule-first analysis with a pluggable LLM provider (DeepSeek in prod), cross-lingual evidence grounding
 - deterministic cold-start: silent backfill before real-time alerts (no alert storm on first deploy)
-- durable DingTalk outbox with retry for red alerts, recall updates, the daily Chinese report, source-health pages, and unacked-alert escalation
+- durable DingTalk outbox with retry for red alerts and recall overview digests; scheduled daily Chinese summaries, source-health pages, and unacked-alert escalation
 - dedicated CPSC 26-659 recall registry covering affected models, Reddit Atom, news/RSS, CPSC, legal feeds, and general-web search APIs
 - auditable group-history import and UTF-8 CSV statistics-table export
 - human feedback loop (confirm / false-positive / mute) via the `review` CLI and the web review page
@@ -75,8 +75,10 @@ Backfilled mentions are stored with `backfill=true`, analyzed, and grouped into 
 
 Alerts are committed to a durable database outbox before network delivery. Failed
 webhook calls remain pending and retry with exponential backoff; a transient
-DingTalk failure no longer loses the alert. Recall updates are routine messages
-without @ mentions, while red alerts keep the configured on-call @ policy.
+DingTalk failure no longer loses the alert. Routine recall findings are grouped
+into overview digests without @ mentions; red alerts remain immediate and keep
+the configured on-call @ policy. Public URLs are rendered as the short label
+“链接” in DingTalk markdown while the full URL remains available behind it.
 
 Use DingTalk custom robot delivery:
 
