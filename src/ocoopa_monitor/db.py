@@ -82,7 +82,6 @@ class Database:
                 ON CONFLICT(term) DO UPDATE SET
                     category=excluded.category,
                     lane=excluded.lane,
-                    active=excluded.active,
                     updated_at=excluded.updated_at
                 """,
                 [(kw.term, kw.category, kw.lane, int(kw.active), now, now) for kw in keywords],
@@ -501,6 +500,235 @@ class Database:
             )
             return int(cur.lastrowid)
 
+    def insert_alert_with_outbox(
+        self,
+        *,
+        mention_id: int,
+        incident_group_id: Optional[int],
+        risk_level: str,
+        alert_reason: str,
+        dedupe_key: str,
+        confidence: float,
+        evidence_check_passed: bool,
+        needs_human_review: bool,
+        delivery_latency_seconds: Optional[int],
+        payload: Dict[str, Any],
+    ) -> int:
+        """Atomically persist the alert and its delivery job.
+
+        The alert dedupe key is also the outbox dedupe key, so a transport
+        failure can be retried without either losing or duplicating the page.
+        """
+        now = dt_to_str(utcnow())
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO alerts(
+                    mention_id, incident_group_id, risk_level, alert_reason, dedupe_key,
+                    confidence, evidence_check_passed, needs_human_review,
+                    delivery_latency_seconds, sent_to, sent_at, ack_status, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'pending', ?)
+                """,
+                (
+                    mention_id,
+                    incident_group_id,
+                    risk_level,
+                    alert_reason,
+                    dedupe_key,
+                    confidence,
+                    int(evidence_check_passed),
+                    int(needs_human_review),
+                    delivery_latency_seconds,
+                    now,
+                ),
+            )
+            alert_id = int(cur.lastrowid)
+            conn.execute(
+                """
+                INSERT INTO delivery_outbox(
+                    kind, dedupe_key, entity_type, entity_id, payload_json,
+                    status, attempt_count, next_attempt_at, created_at, updated_at
+                )
+                VALUES ('red_alert', ?, 'alert', ?, ?, 'pending', 0, ?, ?, ?)
+                """,
+                (dedupe_key, alert_id, json.dumps(payload, ensure_ascii=False), now, now, now),
+            )
+            return alert_id
+
+    def enqueue_delivery(
+        self,
+        *,
+        kind: str,
+        dedupe_key: str,
+        entity_type: str,
+        entity_id: int,
+        payload: Dict[str, Any],
+    ) -> bool:
+        now = dt_to_str(utcnow())
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO delivery_outbox(
+                    kind, dedupe_key, entity_type, entity_id, payload_json,
+                    status, attempt_count, next_attempt_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+                ON CONFLICT(dedupe_key) DO NOTHING
+                """,
+                (
+                    kind,
+                    dedupe_key,
+                    entity_type,
+                    entity_id,
+                    json.dumps(payload, ensure_ascii=False),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            return cur.rowcount > 0
+
+    def list_due_deliveries(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM delivery_outbox
+                WHERE status='pending' AND next_attempt_at <= ?
+                ORDER BY CASE kind WHEN 'red_alert' THEN 0 ELSE 1 END, id
+                LIMIT ?
+                """,
+                (dt_to_str(utcnow()), limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item.pop("payload_json"))
+            result.append(item)
+        return result
+
+    def mark_delivery_sent(self, job_id: int, sent_to: str, sent_at: datetime) -> None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT entity_type, entity_id FROM delivery_outbox WHERE id=?", (job_id,)
+            ).fetchone()
+            conn.execute(
+                """
+                UPDATE delivery_outbox
+                SET status='sent', delivered_at=?, last_error=NULL, updated_at=?
+                WHERE id=?
+                """,
+                (dt_to_str(sent_at), dt_to_str(sent_at), job_id),
+            )
+            if row and row["entity_type"] == "alert":
+                conn.execute(
+                    "UPDATE alerts SET sent_to=?, sent_at=? WHERE id=?",
+                    (sent_to, dt_to_str(sent_at), row["entity_id"]),
+                )
+                conn.execute(
+                    """
+                    UPDATE recall_mentions
+                    SET sync_status='synced', synced_at=?, updated_at=?
+                    WHERE mention_id=(SELECT mention_id FROM alerts WHERE id=?)
+                    """,
+                    (dt_to_str(sent_at), dt_to_str(sent_at), row["entity_id"]),
+                )
+            if row and row["entity_type"] == "recall_mention":
+                conn.execute(
+                    """
+                    UPDATE recall_mentions
+                    SET sync_status='synced', synced_at=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (dt_to_str(sent_at), dt_to_str(sent_at), row["entity_id"]),
+                )
+
+    def mark_delivery_failed(self, job_id: int, error: str, next_attempt_at: datetime) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE delivery_outbox
+                SET attempt_count=attempt_count+1, last_error=?, next_attempt_at=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    error[:1000],
+                    dt_to_str(next_attempt_at),
+                    dt_to_str(utcnow()),
+                    job_id,
+                ),
+            )
+
+    def upsert_recall_mention(
+        self,
+        mention_id: int,
+        *,
+        origin: str = "external",
+        sync_status: str = "pending",
+        group_synced_at: Optional[datetime] = None,
+    ) -> int:
+        now = dt_to_str(utcnow())
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO recall_mentions(
+                    campaign_key, mention_id, origin, sync_status, group_synced_at,
+                    first_discovered_at, last_seen_at, created_at, updated_at
+                )
+                VALUES ('ocoopa-cpsc-26-659', ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(mention_id) DO UPDATE SET
+                    last_seen_at=excluded.last_seen_at,
+                    origin=CASE
+                        WHEN recall_mentions.origin='group_import' THEN recall_mentions.origin
+                        ELSE excluded.origin
+                    END,
+                    sync_status=CASE
+                        WHEN recall_mentions.sync_status='synced' THEN recall_mentions.sync_status
+                        ELSE excluded.sync_status
+                    END,
+                    group_synced_at=COALESCE(recall_mentions.group_synced_at, excluded.group_synced_at),
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    mention_id,
+                    origin,
+                    sync_status,
+                    dt_to_str(group_synced_at),
+                    now,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT id FROM recall_mentions WHERE mention_id=?", (mention_id,)
+            ).fetchone()
+            return int(row["id"])
+
+    def list_recall_mentions(self, limit: int = 500) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.id AS recall_record_id, r.campaign_key, r.origin, r.sync_status,
+                       r.first_discovered_at, r.last_seen_at, r.group_synced_at, r.synced_at,
+                       m.id AS mention_id, m.source_type, m.source_name, m.source_url,
+                       m.title, m.author_or_publisher, m.published_at, m.fetched_at,
+                       m.text_excerpt, m.matched_keywords,
+                       a.sentiment, a.risk_level, a.category, a.summary_zh,
+                       a.confidence, a.evidence_check_passed, a.needs_human_review
+                FROM recall_mentions r
+                JOIN mentions m ON m.id=r.mention_id
+                LEFT JOIN analysis_results a ON a.id=(
+                    SELECT id FROM analysis_results
+                    WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
+                )
+                ORDER BY COALESCE(m.published_at, m.fetched_at) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     # --- M2 human feedback loop (review CLI) ---
     def is_incident_suppressed(self, event_fingerprint: str, now: Optional[datetime] = None) -> bool:
         now = now or utcnow()
@@ -660,7 +888,10 @@ class Database:
                        a.escalation_reason, a.confidence, a.evidence_check_passed,
                        a.needs_human_review
                 FROM mentions m
-                LEFT JOIN analysis_results a ON a.mention_id=m.id
+                LEFT JOIN analysis_results a ON a.id=(
+                    SELECT id FROM analysis_results
+                    WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
+                )
                 WHERE substr(m.fetched_at, 1, 10)=?
                 ORDER BY
                     CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
@@ -677,7 +908,10 @@ class Database:
                        a.escalation_reason, a.confidence, a.evidence_check_passed,
                        a.needs_human_review
                 FROM mentions m
-                LEFT JOIN analysis_results a ON a.mention_id=m.id
+                LEFT JOIN analysis_results a ON a.id=(
+                    SELECT id FROM analysis_results
+                    WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
+                )
                 WHERE m.fetched_at >= ? AND m.fetched_at < ?
                 ORDER BY
                     CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
@@ -773,7 +1007,6 @@ class PostgresDatabase:
                     ON CONFLICT(term) DO UPDATE SET
                         category=excluded.category,
                         lane=excluded.lane,
-                        active=excluded.active,
                         updated_at=excluded.updated_at
                     """,
                     (kw.term, kw.category, kw.lane, kw.active, now, now),
@@ -1194,6 +1427,190 @@ class PostgresDatabase:
             ).fetchone()
             return int(row["id"])
 
+    def insert_alert_with_outbox(
+        self,
+        *,
+        mention_id: int,
+        incident_group_id: Optional[int],
+        risk_level: str,
+        alert_reason: str,
+        dedupe_key: str,
+        confidence: float,
+        evidence_check_passed: bool,
+        needs_human_review: bool,
+        delivery_latency_seconds: Optional[int],
+        payload: Dict[str, Any],
+    ) -> int:
+        now = utcnow()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO alerts(
+                    mention_id, incident_group_id, risk_level, alert_reason, dedupe_key,
+                    confidence, evidence_check_passed, needs_human_review,
+                    delivery_latency_seconds, sent_to, sent_at, ack_status, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, NULL, 'pending', %s)
+                RETURNING id
+                """,
+                (
+                    mention_id, incident_group_id, risk_level, alert_reason, dedupe_key,
+                    confidence, evidence_check_passed, needs_human_review,
+                    delivery_latency_seconds, now,
+                ),
+            ).fetchone()
+            alert_id = int(row["id"])
+            conn.execute(
+                """
+                INSERT INTO delivery_outbox(
+                    kind, dedupe_key, entity_type, entity_id, payload_json,
+                    status, attempt_count, next_attempt_at, created_at, updated_at
+                )
+                VALUES ('red_alert', %s, 'alert', %s, %s, 'pending', 0, %s, %s, %s)
+                """,
+                (dedupe_key, alert_id, json.dumps(payload, ensure_ascii=False), now, now, now),
+            )
+            return alert_id
+
+    def enqueue_delivery(
+        self, *, kind: str, dedupe_key: str, entity_type: str,
+        entity_id: int, payload: Dict[str, Any],
+    ) -> bool:
+        now = utcnow()
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO delivery_outbox(
+                    kind, dedupe_key, entity_type, entity_id, payload_json,
+                    status, attempt_count, next_attempt_at, created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, 'pending', 0, %s, %s, %s)
+                ON CONFLICT(dedupe_key) DO NOTHING
+                """,
+                (
+                    kind, dedupe_key, entity_type, entity_id,
+                    json.dumps(payload, ensure_ascii=False), now, now, now,
+                ),
+            )
+            return cur.rowcount > 0
+
+    def list_due_deliveries(self, limit: int = 50) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM delivery_outbox
+                WHERE status='pending' AND next_attempt_at <= %s
+                ORDER BY CASE kind WHEN 'red_alert' THEN 0 ELSE 1 END, id LIMIT %s
+                """,
+                (utcnow(), limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            raw = item.pop("payload_json")
+            item["payload"] = json.loads(raw) if isinstance(raw, str) else raw
+            result.append(item)
+        return result
+
+    def mark_delivery_sent(self, job_id: int, sent_to: str, sent_at: datetime) -> None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT entity_type, entity_id FROM delivery_outbox WHERE id=%s", (job_id,)
+            ).fetchone()
+            conn.execute(
+                """
+                UPDATE delivery_outbox
+                SET status='sent', delivered_at=%s, last_error=NULL, updated_at=%s
+                WHERE id=%s
+                """,
+                (sent_at, sent_at, job_id),
+            )
+            if row and row["entity_type"] == "alert":
+                conn.execute(
+                    "UPDATE alerts SET sent_to=%s, sent_at=%s WHERE id=%s",
+                    (sent_to, sent_at, row["entity_id"]),
+                )
+                conn.execute(
+                    """
+                    UPDATE recall_mentions
+                    SET sync_status='synced', synced_at=%s, updated_at=%s
+                    WHERE mention_id=(SELECT mention_id FROM alerts WHERE id=%s)
+                    """,
+                    (sent_at, sent_at, row["entity_id"]),
+                )
+            if row and row["entity_type"] == "recall_mention":
+                conn.execute(
+                    "UPDATE recall_mentions SET sync_status='synced', synced_at=%s, updated_at=%s WHERE id=%s",
+                    (sent_at, sent_at, row["entity_id"]),
+                )
+
+    def mark_delivery_failed(self, job_id: int, error: str, next_attempt_at: datetime) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE delivery_outbox
+                SET attempt_count=attempt_count+1, last_error=%s,
+                    next_attempt_at=%s, updated_at=%s
+                WHERE id=%s
+                """,
+                (error[:1000], next_attempt_at, utcnow(), job_id),
+            )
+
+    def upsert_recall_mention(
+        self,
+        mention_id: int,
+        *,
+        origin: str = "external",
+        sync_status: str = "pending",
+        group_synced_at: Optional[datetime] = None,
+    ) -> int:
+        now = utcnow()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO recall_mentions(
+                    campaign_key, mention_id, origin, sync_status, group_synced_at,
+                    first_discovered_at, last_seen_at, created_at, updated_at
+                )
+                VALUES ('ocoopa-cpsc-26-659', %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(mention_id) DO UPDATE SET
+                    last_seen_at=excluded.last_seen_at,
+                    origin=CASE WHEN recall_mentions.origin='group_import'
+                                THEN recall_mentions.origin ELSE excluded.origin END,
+                    sync_status=CASE WHEN recall_mentions.sync_status='synced'
+                                     THEN recall_mentions.sync_status ELSE excluded.sync_status END,
+                    group_synced_at=COALESCE(recall_mentions.group_synced_at, excluded.group_synced_at),
+                    updated_at=excluded.updated_at
+                RETURNING id
+                """,
+                (mention_id, origin, sync_status, group_synced_at, now, now, now, now),
+            ).fetchone()
+            return int(row["id"])
+
+    def list_recall_mentions(self, limit: int = 500) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.id AS recall_record_id, r.campaign_key, r.origin, r.sync_status,
+                       r.first_discovered_at, r.last_seen_at, r.group_synced_at, r.synced_at,
+                       m.id AS mention_id, m.source_type, m.source_name, m.source_url,
+                       m.title, m.author_or_publisher, m.published_at, m.fetched_at,
+                       m.text_excerpt, m.matched_keywords,
+                       a.sentiment, a.risk_level, a.category, a.summary_zh,
+                       a.confidence, a.evidence_check_passed, a.needs_human_review
+                FROM recall_mentions r
+                JOIN mentions m ON m.id=r.mention_id
+                LEFT JOIN analysis_results a ON a.id=(
+                    SELECT id FROM analysis_results
+                    WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
+                )
+                ORDER BY COALESCE(m.published_at, m.fetched_at) DESC
+                LIMIT %s
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     # --- M2 human feedback loop (review CLI) ---
     def is_incident_suppressed(self, event_fingerprint: str, now: Optional[datetime] = None) -> bool:
         now = now or utcnow()
@@ -1353,7 +1770,10 @@ class PostgresDatabase:
                        a.escalation_reason, a.confidence, a.evidence_check_passed,
                        a.needs_human_review
                 FROM mentions m
-                LEFT JOIN analysis_results a ON a.mention_id=m.id
+                LEFT JOIN analysis_results a ON a.id=(
+                    SELECT id FROM analysis_results
+                    WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
+                )
                 WHERE m.fetched_at >= %s AND m.fetched_at < %s
                 ORDER BY
                     CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
@@ -1370,7 +1790,10 @@ class PostgresDatabase:
                        a.escalation_reason, a.confidence, a.evidence_check_passed,
                        a.needs_human_review
                 FROM mentions m
-                LEFT JOIN analysis_results a ON a.mention_id=m.id
+                LEFT JOIN analysis_results a ON a.id=(
+                    SELECT id FROM analysis_results
+                    WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
+                )
                 WHERE m.fetched_at >= %s::date AND m.fetched_at < (%s::date + INTERVAL '1 day')
                 ORDER BY
                     CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
@@ -1620,6 +2043,41 @@ CREATE TABLE IF NOT EXISTS alerts (
     muted_until TEXT,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS recall_mentions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_key TEXT NOT NULL,
+    mention_id INTEGER NOT NULL UNIQUE REFERENCES mentions(id) ON DELETE CASCADE,
+    origin TEXT NOT NULL DEFAULT 'external',
+    sync_status TEXT NOT NULL DEFAULT 'pending',
+    first_discovered_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    group_synced_at TEXT,
+    synced_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_recall_mentions_sync_status ON recall_mentions(sync_status);
+
+CREATE TABLE IF NOT EXISTS delivery_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    entity_type TEXT NOT NULL,
+    entity_id INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    last_error TEXT,
+    delivered_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_outbox_due
+ON delivery_outbox(status, next_attempt_at);
 
 CREATE TABLE IF NOT EXISTS daily_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

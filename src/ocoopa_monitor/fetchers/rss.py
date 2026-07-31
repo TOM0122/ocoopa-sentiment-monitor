@@ -31,7 +31,15 @@ class GoogleNewsRSSFetcher(Fetcher):
                 errors.append(f"{query}: {exc}")
         if errors and not items:
             raise RuntimeError("; ".join(errors))
-        return items
+        unique = {}
+        for item in items:
+            key = (
+                item.title.lower(),
+                item.author_or_publisher or "",
+                item.published_at.isoformat() if item.published_at else item.source_url,
+            )
+            unique[key] = item
+        return list(unique.values())
 
     def _fetch_query(self, source: SourceConfig, query: str, since: Optional[datetime]) -> List[RawItem]:
         url = google_news_rss_url(query)
@@ -47,6 +55,7 @@ class GoogleNewsRSSFetcher(Fetcher):
             title = normalize_text(_node_text(node, "title"))
             link = normalize_text(_node_text(node, "link"))
             description = normalize_text(_node_text(node, "description"))
+            publisher = normalize_text(_node_text(node, "source"))
             published_at = _parse_rss_date(_node_text(node, "pubDate"))
             if since and published_at and published_at < since:
                 continue
@@ -60,7 +69,7 @@ class GoogleNewsRSSFetcher(Fetcher):
                     title=title or link,
                     raw_text=f"{title}\n{description}",
                     published_at=published_at,
-                    author_or_publisher="Google News RSS",
+                    author_or_publisher=publisher or "Google News RSS",
                     language="en",
                     country_or_market="US",
                     tos_method="rss",
@@ -70,6 +79,12 @@ class GoogleNewsRSSFetcher(Fetcher):
 
     @staticmethod
     def _queries(lane: str, keywords: List[str]) -> List[str]:
+        current_recall_terms = [
+            '"OCOOPA" "26-659"',
+            '"OCOOPA" ("UT3053" OR "UT3056" OR "ZLS-118" OR "H01") recall',
+            '"Shenzhen Street Cat Technology" recall',
+            '"OCOOPA" ("1.5 million" OR "1,480 reports" OR "350 burn injuries")',
+        ]
         fallback_high_terms = [
             "Ocoopa lawsuit",
             "Ocoopa wrongful death",
@@ -87,7 +102,7 @@ class GoogleNewsRSSFetcher(Fetcher):
         if not high_terms:
             high_terms = fallback_high_terms
         if lane == "high":
-            return high_terms[:16]
+            return _unique(current_recall_terms + high_terms)[:16]
         category_terms = [
             term
             for term in keywords
@@ -99,7 +114,18 @@ class GoogleNewsRSSFetcher(Fetcher):
                 "rechargeable hand warmer recall",
                 "electric hand warmer burn",
             ]
-        return (high_terms + category_terms)[:24]
+        return _unique(current_recall_terms + high_terms + category_terms)[:24]
+
+
+def _unique(values: Iterable[str]) -> List[str]:
+    seen = set()
+    result = []
+    for value in values:
+        key = value.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(value)
+    return result
 
 
 def _node_text(node: ET.Element, name: str) -> str:

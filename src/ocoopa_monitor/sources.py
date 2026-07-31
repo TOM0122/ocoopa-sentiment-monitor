@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import List
+from urllib.parse import quote_plus
 
 from .models import SourceConfig
 
@@ -27,10 +28,13 @@ DEFAULT_SOURCES: List[SourceConfig] = [
     SourceConfig(
         source_name="cpsc_recalls",
         source_type="cpsc",
-        priority="P0",
+        # The legacy retrieval API can lag newly published CPSC.gov pages.
+        # Keep it as supplementary P1; the exact-query Google News P0 source
+        # independently captures the official CPSC publication in real time.
+        priority="P1",
         lane="high",
         method="api",
-        url="http://www.saferproducts.gov/RestWebServices/Recall?format=json",
+        url="https://www.saferproducts.gov/RestWebServices/Recall?format=json",
         alert_threshold_minutes=120,
     ),
     # Legal lead-gen / class-action aggregator (public RSS, robots-allowed,
@@ -44,6 +48,19 @@ DEFAULT_SOURCES: List[SourceConfig] = [
         method="generic_rss",
         url="https://www.aboutlawsuits.com/feed/",
         alert_threshold_minutes=180,
+    ),
+    SourceConfig(
+        source_name="reddit_recall_atom",
+        source_type="social",
+        priority="P1",
+        lane="high",
+        method="generic_rss",
+        url=(
+            "https://www.reddit.com/search.rss?q="
+            + quote_plus('"OCOOPA" (recall OR fire OR burn OR overheat OR UT3053 OR UT3056 OR ZLS-118 OR H01)')
+            + "&sort=new&t=month"
+        ),
+        alert_threshold_minutes=240,
     ),
     # --- REGULAR lane (hourly): commercial APIs throttled into free quotas ---
     SourceConfig(
@@ -71,15 +88,6 @@ DEFAULT_SOURCES: List[SourceConfig] = [
         lane="regular",
         method="rss",
         url="google-news://regular",
-        alert_threshold_minutes=360,
-    ),
-    SourceConfig(
-        source_name="prnewswire_rss",
-        source_type="news",
-        priority="P1",
-        lane="regular",
-        method="generic_rss",
-        url="https://www.prnewswire.com/rss/news-releases-list.rss",
         alert_threshold_minutes=360,
     ),
 ]

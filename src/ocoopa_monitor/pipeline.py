@@ -18,6 +18,8 @@ from .fetchers import (
 )
 from .llm import RuleOnlyProvider, provider_from_settings
 from .models import Mention, RawItem, SourceConfig, utcnow
+from .outbox import DeliveryOutboxWorker
+from .recall import is_current_recall, recall_update_payload
 from .normalize import (
     canonicalize_url,
     content_hash,
@@ -69,6 +71,8 @@ class MonitorPipeline:
         stats = {
             "sources_attempted": 0,
             "sources_failed": 0,
+            "p0_sources_attempted": 0,
+            "p0_sources_failed": 0,
             "items_fetched": 0,
             "items_filtered_since": 0,
             "items_filtered_no_keywords": 0,
@@ -79,9 +83,15 @@ class MonitorPipeline:
             "alerts_suppressed_pre_bootstrap": 0,
             "alerts_suppressed_muted": 0,
             "alerts_suppressed_cooldown": 0,
+            "recall_mentions_registered": 0,
+            "recall_updates_queued": 0,
+            "deliveries_sent": 0,
+            "deliveries_failed": 0,
         }
         for source in self.db.get_sources(lane):
             stats["sources_attempted"] += 1
+            if source.priority == "P0":
+                stats["p0_sources_attempted"] += 1
             self.db.record_source_attempt(source)
             try:
                 fetcher = self._fetcher_for(source)
@@ -107,8 +117,13 @@ class MonitorPipeline:
                     self.db.insert_analysis(analysis)
                     incident_group_id = self.db.upsert_incident_group(stored, analysis)
                     stats["mentions_processed"] += 1
+                    recall_record_id = None
+                    if is_current_recall(stored.title, stored.raw_text):
+                        recall_record_id = self.db.upsert_recall_mention(stored.id)
+                        stats["recall_mentions_registered"] += 1
                     if self._is_red_escalation(analysis) and not realtime_enabled:
                         stats["alerts_suppressed_pre_bootstrap"] += 1
+                    alert_created = False
                     if self._should_alert(stored, analysis, backfill, realtime_enabled):
                         if self.db.is_incident_suppressed(stored.event_fingerprint):
                             # Human marked this incident false-positive or muted.
@@ -119,10 +134,25 @@ class MonitorPipeline:
                             stats["alerts_suppressed_cooldown"] += 1
                         elif self._create_alert(stored, analysis, incident_group_id):
                             stats["alerts_created"] += 1
+                            alert_created = True
+                    if recall_record_id and realtime_enabled and not alert_created:
+                        queued = self.db.enqueue_delivery(
+                            kind="recall_update",
+                            dedupe_key=f"recall:{stored.id}",
+                            entity_type="recall_mention",
+                            entity_id=recall_record_id,
+                            payload=recall_update_payload(stored, analysis),
+                        )
+                        stats["recall_updates_queued"] += int(queued)
                 self.db.record_source_success(source)
             except Exception as exc:
                 stats["sources_failed"] += 1
+                if source.priority == "P0":
+                    stats["p0_sources_failed"] += 1
                 self.db.record_source_failure(source, str(exc))
+        delivery_stats = DeliveryOutboxWorker(self.db, self.delivery_client).drain()
+        stats["deliveries_sent"] = delivery_stats["sent"]
+        stats["deliveries_failed"] = delivery_stats["failed"]
         return stats
 
     def bootstrap(self, since_days: int) -> Dict[str, Dict[str, int]]:
@@ -135,6 +165,12 @@ class MonitorPipeline:
         stats: Dict[str, Dict[str, int]] = {}
         for lane in ("high", "regular"):
             stats[lane] = self.run_lane(lane, backfill=True, since_days=since_days)
+        high = stats["high"]
+        if high["p0_sources_attempted"] == 0 or high["p0_sources_failed"] > 0:
+            raise RuntimeError(
+                "bootstrap incomplete: every high-lane P0 source must complete successfully; "
+                f"attempted={high['p0_sources_attempted']} failed={high['p0_sources_failed']}"
+            )
         self.db.mark_bootstrapped()
         return stats
 
@@ -232,8 +268,8 @@ class MonitorPipeline:
         dedupe_key = f"{mention.event_fingerprint}:red"
         if self.db.alert_exists(dedupe_key):
             return False
-        sent_at = utcnow()
-        delivery_latency_seconds = self._delivery_latency_seconds(mention, sent_at)
+        queued_at = utcnow()
+        delivery_latency_seconds = self._delivery_latency_seconds(mention, queued_at)
         payload = self.delivery_client.alert_payload(
             title=mention.title,
             url=mention.source_url,
@@ -242,11 +278,10 @@ class MonitorPipeline:
             confidence=analysis.confidence,
             evidence_check_passed=analysis.evidence_check_passed,
             needs_human_review=analysis.needs_human_review,
-            sent_at=sent_at,
+            sent_at=queued_at,
             delivery_latency_seconds=delivery_latency_seconds,
         )
-        sent_to = self.delivery_client.send_alert(payload)
-        self.db.insert_alert(
+        self.db.insert_alert_with_outbox(
             mention_id=mention.id,
             incident_group_id=incident_group_id,
             risk_level=analysis.risk_level,
@@ -256,14 +291,13 @@ class MonitorPipeline:
             evidence_check_passed=analysis.evidence_check_passed,
             needs_human_review=analysis.needs_human_review,
             delivery_latency_seconds=delivery_latency_seconds,
-            sent_to=sent_to,
-            sent_at=sent_at,
+            payload=payload,
         )
         self.db.record_topic_alert(
             topic_key(mention.title, mention.raw_text, mention.matched_keywords),
             mention.source_type,
             analysis.risk_level,
-            sent_at,
+            queued_at,
         )
         return True
 

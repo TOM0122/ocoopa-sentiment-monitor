@@ -56,17 +56,33 @@ RISK_TOPIC_TAGS = {
     "recall": ["recall", "cpsc", "召回"],
 }
 
+MODEL_PATTERN = re.compile(r"\b(?:UT\d{4}|ZLS-\d+[A-Z]?|H01(?:\s*\(PD\))?)\b", re.IGNORECASE)
+RECALL_NUMBER_PATTERN = re.compile(r"\b\d{2}-\d{3}\b")
+LOCATION_PATTERN = re.compile(
+    r"\b(?:in|near|at)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b"
+)
+
 
 def topic_key(title: str, raw_text: str, matched_keywords: Iterable[str]) -> str:
-    """Coarse, stable signature clustering articles about the same KIND of event.
+    """Stable signature for cross-source reports about the same event.
 
-    Used for cross-source alert cooldown: many outlets reporting the same
-    incident collapse to one topic, so the team is not paged once per outlet.
+    Risk tags retain cross-outlet clustering. Strong identifiers (recall number,
+    model, or an explicit title location) split distinct incidents so two fires
+    of the same general kind are not silently merged.
     """
-    text = normalize_text(f"{title} {raw_text}").lower()
+    combined = normalize_text(f"{title} {raw_text}")
+    text = combined.lower()
     tags = [tag for tag, needles in RISK_TOPIC_TAGS.items() if any(n in text for n in needles)]
     if tags:
-        return "|".join(sorted(set(tags)))
+        identifiers = {item.upper().replace(" ", "") for item in MODEL_PATTERN.findall(combined)}
+        identifiers.update(RECALL_NUMBER_PATTERN.findall(combined))
+        location_match = LOCATION_PATTERN.search(normalize_text(title))
+        if location_match:
+            identifiers.add("loc:" + location_match.group(1).lower().replace(" ", "-"))
+        parts = sorted(set(tags))
+        if identifiers:
+            parts.extend(sorted(identifiers))
+        return "|".join(parts)
     keys = sorted({kw.lower() for kw in matched_keywords})[:3]
     return "kw:" + "|".join(keys) if keys else "untagged"
 

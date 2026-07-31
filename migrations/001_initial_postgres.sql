@@ -151,6 +151,41 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_dedupe_key ON alerts(dedupe_key);
 
+CREATE TABLE IF NOT EXISTS recall_mentions (
+    id BIGSERIAL PRIMARY KEY,
+    campaign_key TEXT NOT NULL,
+    mention_id BIGINT NOT NULL UNIQUE REFERENCES mentions(id) ON DELETE CASCADE,
+    origin TEXT NOT NULL DEFAULT 'external',
+    sync_status TEXT NOT NULL DEFAULT 'pending',
+    first_discovered_at TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL,
+    group_synced_at TIMESTAMPTZ,
+    synced_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_recall_mentions_sync_status ON recall_mentions(sync_status);
+
+CREATE TABLE IF NOT EXISTS delivery_outbox (
+    id BIGSERIAL PRIMARY KEY,
+    kind TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    entity_type TEXT NOT NULL,
+    entity_id BIGINT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL,
+    last_error TEXT,
+    delivered_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_outbox_due
+ON delivery_outbox(status, next_attempt_at);
+
 CREATE TABLE IF NOT EXISTS daily_reports (
     id BIGSERIAL PRIMARY KEY,
     report_date DATE NOT NULL,

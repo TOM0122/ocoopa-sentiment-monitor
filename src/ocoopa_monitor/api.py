@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 try:
-    from fastapi import FastAPI, Response
+    from fastapi import FastAPI, Header, Response
     from fastapi.responses import HTMLResponse
 except ImportError:  # pragma: no cover - optional runtime dependency
     FastAPI = None  # type: ignore
@@ -16,6 +16,8 @@ from .keywords import DEFAULT_KEYWORDS
 from .models import utcnow
 from .pipeline import MonitorPipeline
 from .reports import DailyReportService
+from .outbox import DeliveryOutboxWorker
+from .delivery import DeliveryClient
 from .review_web import apply_mark, render_result, render_review_page, token_ok
 from .source_health import SourceHealthMonitor
 from .sources import DEFAULT_SOURCES
@@ -32,36 +34,73 @@ if FastAPI is not None:
         db.seed_keywords(DEFAULT_KEYWORDS)
         db.seed_sources(DEFAULT_SOURCES)
 
+    def _authorized(token: str, authorization: str) -> bool:
+        provided = token
+        if authorization.lower().startswith("bearer "):
+            provided = authorization[7:].strip()
+        return token_ok(settings.review_token, provided)
+
+    def _unauthorized(response_class=Response):
+        if response_class is HTMLResponse:
+            return HTMLResponse("<p>未授权（缺少或错误的 token）。</p>", status_code=401)
+        return Response("unauthorized", status_code=401)
+
     @app.post("/run/high")
-    def run_high() -> dict:
+    def run_high(token: str = "", authorization: str = Header(default="")):
+        if not _authorized(token, authorization):
+            return _unauthorized()
         return MonitorPipeline(db, settings).run_lane("high")
 
     @app.post("/run/regular")
-    def run_regular() -> dict:
+    def run_regular(token: str = "", authorization: str = Header(default="")):
+        if not _authorized(token, authorization):
+            return _unauthorized()
         return MonitorPipeline(db, settings).run_lane("regular")
 
     @app.post("/backfill")
-    def run_backfill(days: int = 60) -> dict:
-        return MonitorPipeline(db, settings).run_lane("high", backfill=True, since_days=days)
+    def run_backfill(days: int = 60, token: str = "", authorization: str = Header(default="")):
+        if not _authorized(token, authorization):
+            return _unauthorized()
+        return MonitorPipeline(db, settings).run_lane(
+            "high", backfill=True, since_days=min(max(days, 1), 3650)
+        )
 
     @app.post("/reports/daily")
-    def daily_report(timezone_name: str = "Asia/Shanghai") -> dict:
+    def daily_report(
+        timezone_name: str = "Asia/Shanghai",
+        token: str = "",
+        authorization: str = Header(default=""),
+    ):
+        if not _authorized(token, authorization):
+            return _unauthorized()
         return DailyReportService(db).generate(timezone_name)
 
     @app.get("/health/sources")
-    def source_health() -> dict:
+    def source_health(token: str = "", authorization: str = Header(default="")):
+        if not _authorized(token, authorization):
+            return _unauthorized()
         return {"unhealthy_sources": SourceHealthMonitor(db).check()}
 
     @app.get("/review", response_class=HTMLResponse)
-    def review_page(token: str = "", limit: int = 50) -> HTMLResponse:
-        if not token_ok(settings.review_token, token):
-            return HTMLResponse("<p>未授权（缺少或错误的 token）。</p>", status_code=401)
-        return HTMLResponse(render_review_page(db.list_recent_incidents(limit), token))
+    def review_page(
+        token: str = "",
+        limit: int = 50,
+        authorization: str = Header(default=""),
+    ) -> HTMLResponse:
+        if not _authorized(token, authorization):
+            return _unauthorized(HTMLResponse)
+        return HTMLResponse(render_review_page(db.list_recent_incidents(min(max(limit, 1), 200)), token))
 
     @app.post("/review/mark", response_class=HTMLResponse)
-    def review_mark(incident_id: int, status: str, days: Optional[int] = None, token: str = "") -> HTMLResponse:
-        if not token_ok(settings.review_token, token):
-            return HTMLResponse("<p>未授权（缺少或错误的 token）。</p>", status_code=401)
+    def review_mark(
+        incident_id: int,
+        status: str,
+        days: Optional[int] = None,
+        token: str = "",
+        authorization: str = Header(default=""),
+    ) -> HTMLResponse:
+        if not _authorized(token, authorization):
+            return _unauthorized(HTMLResponse)
         ok, message = apply_mark(db, incident_id, status, days)
         return HTMLResponse(render_result(ok, message, token), status_code=200 if ok else 400)
 
@@ -70,25 +109,42 @@ if FastAPI is not None:
         return end - timedelta(days=max(1, days)), end
 
     @app.get("/dashboard", response_class=HTMLResponse)
-    def dashboard(token: str = "", days: int = 30) -> HTMLResponse:
-        if not token_ok(settings.review_token, token):
-            return HTMLResponse("<p>未授权（缺少或错误的 token）。</p>", status_code=401)
+    def dashboard(
+        token: str = "",
+        days: int = 30,
+        authorization: str = Header(default=""),
+    ) -> HTMLResponse:
+        if not _authorized(token, authorization):
+            return _unauthorized(HTMLResponse)
+        days = min(max(days, 1), 366)
         start, end = _window(days)
         stats = compute_dashboard(db.fetch_mentions_between(start, end), db.list_recent_alerts(1000))
         return HTMLResponse(render_dashboard(stats, days, token))
 
     @app.get("/console/search", response_class=HTMLResponse)
-    def console_search(token: str = "", q: str = "", risk: str = "", days: int = 30) -> HTMLResponse:
-        if not token_ok(settings.review_token, token):
-            return HTMLResponse("<p>未授权（缺少或错误的 token）。</p>", status_code=401)
+    def console_search(
+        token: str = "",
+        q: str = "",
+        risk: str = "",
+        days: int = 30,
+        authorization: str = Header(default=""),
+    ) -> HTMLResponse:
+        if not _authorized(token, authorization):
+            return _unauthorized(HTMLResponse)
+        days = min(max(days, 1), 366)
         start, end = _window(days)
         rows = filter_rows(db.fetch_mentions_between(start, end), q, risk)
         return HTMLResponse(render_search(rows, q, risk, days, token))
 
     @app.get("/console/export.csv")
-    def console_export(token: str = "", days: int = 30):
-        if not token_ok(settings.review_token, token):
-            return Response("unauthorized", status_code=401)
+    def console_export(
+        token: str = "",
+        days: int = 30,
+        authorization: str = Header(default=""),
+    ):
+        if not _authorized(token, authorization):
+            return _unauthorized()
+        days = min(max(days, 1), 366)
         start, end = _window(days)
         csv_text = rows_to_csv(db.fetch_mentions_between(start, end))
         return Response(
@@ -96,5 +152,26 @@ if FastAPI is not None:
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": "attachment; filename=ocoopa_mentions.csv"},
         )
+
+    @app.get("/recall/mentions")
+    def recall_mentions(
+        token: str = "",
+        limit: int = 500,
+        authorization: str = Header(default=""),
+    ):
+        if not _authorized(token, authorization):
+            return _unauthorized()
+        return {"records": db.list_recall_mentions(min(max(limit, 1), 5000))}
+
+    @app.post("/recall/sync")
+    def recall_sync(
+        token: str = "",
+        limit: int = 50,
+        authorization: str = Header(default=""),
+    ):
+        if not _authorized(token, authorization):
+            return _unauthorized()
+        worker = DeliveryOutboxWorker(db, DeliveryClient.from_settings(settings))
+        return worker.drain(min(max(limit, 1), 200))
 else:
     app = None

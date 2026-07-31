@@ -27,6 +27,7 @@ class AnalysisService:
         if mention.id is None:
             raise ValueError("mention.id is required before analysis")
         rule_decision = self.rule_engine.evaluate(mention.title, mention.raw_text, mention.matched_keywords)
+        policy_notes = []
         try:
             payload = self.validator.validate(self.provider.analyze(mention, rule_decision))
             provider = self.provider
@@ -35,6 +36,23 @@ class AnalysisService:
             payload = self.validator.validate(self.fallback_provider.analyze(mention, rule_decision))
             provider = self.fallback_provider
             fallback_note = "llm_provider_failed_fallback_rule_only; "
+
+        # Safety policy is monotonic: an LLM may raise a rule decision, but it
+        # must never silently downgrade a deterministic red/yellow signal. This
+        # keeps prompt injection or model drift from creating a missed alert.
+        risk_order = {"green": 0, "yellow": 1, "red": 2}
+        if risk_order[str(payload["risk_level"])] < risk_order[rule_decision.risk_level]:
+            policy_notes.append(
+                f"llm_downgrade_blocked={payload['risk_level']}->{rule_decision.risk_level}"
+            )
+            payload["risk_level"] = rule_decision.risk_level
+            payload["category"] = rule_decision.category
+        if rule_decision.requires_escalation and not bool(payload["requires_escalation"]):
+            policy_notes.append("llm_escalation_downgrade_blocked")
+            payload["requires_escalation"] = True
+        if rule_decision.requires_escalation and not str(payload["escalation_reason"]).strip():
+            payload["escalation_reason"] = "; ".join(rule_decision.reasons)
+
         evidence = self.evidence_checker.check(
             raw_text=mention.raw_text,
             source_url=mention.source_url,
@@ -62,7 +80,7 @@ class AnalysisService:
             escalation_reason=str(payload["escalation_reason"]),
             confidence=float(payload["confidence"]),
             evidence_check_passed=evidence.passed,
-            evidence_check_notes=fallback_note + evidence.notes,
+            evidence_check_notes=fallback_note + "; ".join(policy_notes + [evidence.notes]),
             needs_human_review=needs_human_review,
             analysis_created_at=utcnow(),
         )

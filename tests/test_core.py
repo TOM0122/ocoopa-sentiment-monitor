@@ -402,7 +402,9 @@ class CoreTests(unittest.TestCase):
         with patch("ocoopa_monitor.fetchers.search_api.urlopen", side_effect=fake_urlopen):
             items = SerpAPIFetcher(api_key="secret").fetch(source, ["Ocoopa lawsuit"])
         self.assertEqual(len(items), 1)
-        self.assertIn("Ocoopa+%28fire+OR+death+OR+lawsuit+OR+recall+OR+CPSC+OR+%22class+action%22%29", captured["url"])
+        self.assertIn("%22Shenzhen+Street+Cat+Technology%22", captured["url"])
+        self.assertIn("%2226-659%22", captured["url"])
+        self.assertIn("UT3053", captured["url"])
 
     def test_production_doctor_requires_deepseek_and_dingtalk_secrets(self):
         report = run_doctor(settings("/tmp/test.db"), production=True)
@@ -424,7 +426,7 @@ class CoreTests(unittest.TestCase):
             alert_rate_limit_per_minute=20,
             alert_cooldown_hours=6,
             alert_ack_timeout_minutes=30,
-            review_token="",
+            review_token="production-review-token",
             llm_provider="deepseek",
             llm_model="deepseek-v4-flash",
             llm_api_key="key",
@@ -505,7 +507,9 @@ class CoreTests(unittest.TestCase):
         with patch("ocoopa_monitor.fetchers.search_api.urlopen", side_effect=fake_urlopen):
             items = BraveSearchFetcher(api_key="secret").fetch(source, ["Ocoopa lawsuit"])
         self.assertEqual(len(items), 1)
-        self.assertIn("Ocoopa+%28fire+OR+death+OR+lawsuit+OR+recall+OR+CPSC+OR+%22class+action%22%29", captured["url"])
+        self.assertIn("%22Shenzhen+Street+Cat+Technology%22", captured["url"])
+        self.assertIn("%2226-659%22", captured["url"])
+        self.assertIn("UT3053", captured["url"])
         self.assertEqual(captured["token"], "secret")
 
     def test_search_api_query_hit_is_retained_without_exact_brand_in_snippet(self):
@@ -778,7 +782,11 @@ class CoreTests(unittest.TestCase):
         r1 = self._run_one(db, tmp, self._red_news("https://a.com/1", "Ocoopa death lawsuit filed in California"))
         self.assertEqual(r1["alerts_created"], 1)
         # Different outlet + different article, SAME topic + same source_type -> suppressed.
-        r2 = self._run_one(db, tmp, self._red_news("https://b.com/2", "Family sues Ocoopa after fatal fire"))
+        r2 = self._run_one(
+            db,
+            tmp,
+            self._red_news("https://b.com/2", "Family sues Ocoopa after fatal fire in California"),
+        )
         self.assertEqual(r2["alerts_created"], 0)
         self.assertEqual(r2["alerts_suppressed_cooldown"], 1)
 

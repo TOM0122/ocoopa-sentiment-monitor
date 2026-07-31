@@ -12,7 +12,9 @@ The core pipeline runs on the Python standard library; the web console/review UI
 - conservative URL/content/event dedupe + cross-source topic cooldown (one page per event)
 - rule-first analysis with a pluggable LLM provider (DeepSeek in prod), cross-lingual evidence grounding
 - deterministic cold-start: silent backfill before real-time alerts (no alert storm on first deploy)
-- DingTalk delivery of red alerts, the daily Chinese report, source-health pages, and unacked-alert escalation
+- durable DingTalk outbox with retry for red alerts, recall updates, the daily Chinese report, source-health pages, and unacked-alert escalation
+- dedicated CPSC 26-659 recall registry covering affected models, Reddit Atom, news/RSS, CPSC, legal feeds, and general-web search APIs
+- auditable group-history import and UTF-8 CSV statistics-table export
 - human feedback loop (confirm / false-positive / mute) via the `review` CLI and the web review page
 - read-only operations console: dashboard, search, CSV export
 
@@ -71,7 +73,10 @@ Backfilled mentions are stored with `backfill=true`, analyzed, and grouped into 
 
 ## Delivery
 
-Alerts and reports are always stored in the database, and (when a channel is configured) also pushed: red alerts in real time, the daily report each morning, source-health pages, and unacked-red-alert escalation.
+Alerts are committed to a durable database outbox before network delivery. Failed
+webhook calls remain pending and retry with exponential backoff; a transient
+DingTalk failure no longer loses the alert. Recall updates are routine messages
+without @ mentions, while red alerts keep the configured on-call @ policy.
 
 Use DingTalk custom robot delivery:
 
@@ -91,6 +96,38 @@ export OCOOPA_ALERT_WEBHOOK_URL="https://..."
 ```
 
 The webhook payload is JSON and can be adapted for Slack, Feishu, or an internal relay.
+
+## CPSC 26-659 Recall Registry
+
+The recall registry is a separate statistics table for the current OCOOPA recall.
+It recognizes recall number `26-659`, importer identity, and affected models
+`UT3053`, `UT3056`, `ZLS-118`, `ZLS-118S`, `ZLS-118D`, `H01`, and `H01(PD)`.
+
+```bash
+# Inspect the unified table
+python3 -m ocoopa_monitor.cli recall list --limit 200
+
+# Export a UTF-8 CSV for operations
+python3 -m ocoopa_monitor.cli recall export ./outputs/recall-26-659.csv --limit 5000
+
+# Import content that was already shared in the DingTalk group
+python3 -m ocoopa_monitor.cli recall import-group ./group-history.csv
+
+# Queue unsynced historical records and retry due deliveries
+python3 -m ocoopa_monitor.cli recall sync --limit 10
+```
+
+Group imports accept CSV, JSONL, or NDJSON. CSV columns are:
+`platform,source_name,source_url,title,content,published_at,author_or_publisher,group_synced_at`.
+Rows imported from the group are marked `origin=group_import` and
+`sync_status=synced`, so they are registered without being sent back to the
+group. A template is available at
+[`docs/recall-group-import-template.csv`](docs/recall-group-import-template.csv).
+
+The custom DingTalk robot used by this project can send messages but cannot read
+group history. Automatic group-history ingestion therefore requires a separate
+read-capable DingTalk app and explicit authorization; until then, use the
+auditable import command above.
 
 ## LLM Provider
 
@@ -178,10 +215,18 @@ High-sensitivity lane (15 min, free / unmetered):
 - Google News RSS (mainstream-media follow-up)
 - CPSC Recall API via `saferproducts.gov`
 - AboutLawsuits public RSS (class-action lead-gen; `source_type=legal`)
+- Reddit public Atom search for recall/fire/model propagation
 
 Regular lane (hourly):
 - Brave Search / GNews (when API keys are set; throttled into free quotas)
-- Google News RSS + PRNewswire RSS redundancy
+- Google News RSS redundancy
+
+“All external discourse” is implemented as best-effort coverage of compliant,
+publicly accessible or licensed sources. Closed/private groups and social
+platforms that block unauthenticated indexing (for example private Facebook,
+Instagram, TikTok, or X content) cannot be claimed as complete without approved
+platform API access. General-web search APIs provide secondary discovery for
+publicly indexed pages on those platforms.
 
 `seed_sources` deactivates any source removed from `DEFAULT_SOURCES`, so the seed list is the single source of truth. The CPSC source follows the public recall API; confirm live ToS, parameters, and rate limits before relying on it.
 

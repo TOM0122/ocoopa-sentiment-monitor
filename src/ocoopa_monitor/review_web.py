@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from html import escape
+import hmac
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
@@ -24,7 +25,7 @@ def token_ok(configured: str, provided: str) -> bool:
     """If no token is configured the page is open (dev); otherwise it must match."""
     if not configured:
         return True
-    return bool(provided) and provided == configured
+    return bool(provided) and hmac.compare_digest(provided, configured)
 
 
 def _mark_url(incident_id: int, status: str, days: Optional[int], token: str) -> str:

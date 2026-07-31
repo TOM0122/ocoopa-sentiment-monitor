@@ -22,6 +22,7 @@ Ocoopa 舆情与 PR 监控 Agent 的部署、冷启动与日常运行说明。
 | `OCOOPA_ALERT_WEBHOOK_URL` | 钉钉机器人 webhook |
 | `OCOOPA_ALERT_WEBHOOK_SECRET` | 钉钉加签 secret |
 | `OCOOPA_ALERT_AT_MOBILES` | 需要 @ 的负责人手机号(逗号分隔,可选) |
+| `OCOOPA_REVIEW_TOKEN` | 生产 web 全部读写/执行端点的 Bearer token(必需) |
 | `OCOOPA_BRAVE_SEARCH_API_KEY` / `OCOOPA_GNEWS_API_KEY` | 商业 API key(可选,见配额策略) |
 
 > 部署前自检:`python -m ocoopa_monitor.cli doctor --production --json`,`ok=true` 方可上线。
@@ -49,11 +50,13 @@ scheduler 启动时:若数据库未 bootstrap → 自动跑 180 天静默 backfi
 
 启动后 scheduler 持续运行,无需人工干预:
 
-- **高敏车道**每 15 分钟:Google News RSS + CPSC(免费、扛时效)。
+- **高敏车道**每 15 分钟:Google News RSS + CPSC API + AboutLawsuits + Reddit Atom(免费、扛时效)。CPSC 旧检索 API 对新公告可能延迟，因此为 P1 补充源；P0 Google News 使用精确查询独立捕获 CPSC.gov 官方公告。
 - **常规车道**每小时:Brave / GNews / Google News RSS / PRNewswire。
 - **红色高危** → 实时推送钉钉群;`needs_human_review`(低置信/证据未完全校验)的红色仍推送,但文案标注「需人工核实」且不 @ 手机号。
-- **每日 09:00(北京时间)** 生成并**推送**中文日报到钉钉(routine 推送,不 @ 手机号)。
-- **源健康告警**:scheduler 每 30 分钟检查抓取源;**P0 源**(Google News RSS / CPSC / AboutLawsuits)失联或连续失败时推钉钉并 @ 负责人(P1 商业 API 配额失败属预期,不告警)。同一源失败只告警一次,恢复后再失败会重新告警。
+- **每日 09:00 后(北京时间)** 生成并**推送**中文日报到钉钉(routine 推送,不 @ 手机号)。完成日期持久化；重启错过 09:00 窗口会自动补发。
+- **召回专项同步**:命中 CPSC 26-659/受影响型号的每条内容进入 `recall_mentions` 统计表。红色内容走告警；其他内容以 routine 消息同步群。所有消息先写 `delivery_outbox`,失败指数退避重试。
+- **首次升级迁移**:scheduler 会把升级前数据库中已出现在群日报的召回内容补登记为 `synced`,避免部署后把历史内容逐条重新刷屏；升级后新发现的内容仍实时入队。
+- **源健康告警**:scheduler 每 30 分钟检查抓取源;**P0 源**(Google News RSS / AboutLawsuits)失联或连续失败时推钉钉并 @ 负责人(P1 API 配额或数据延迟不直接 @)。同一源失败只告警一次,恢复后再失败会重新告警。
 - **跨源告警去重(防刷屏)**:同一事件话题(如 ocoopa+死亡+诉讼)被多家媒体报道时,冷却窗(默认 6 小时,`OCOOPA_ALERT_COOLDOWN_HOURS`)内只推一条红色;但**新的来源类型首次出现**(如首条 CPSC、首个法律站、首家主流媒体)或风险升级会**突破冷却**照常告警。被去重的仍入库与日报,统计计入 `alerts_suppressed_cooldown`。
 - **红色未处理升级**:红色告警若超过 `OCOOPA_ALERT_ACK_TIMEOUT_MINUTES`(默认 30 分钟)无人复核,scheduler 会**再 @ 一次负责人**(只升级一次,避免刷屏)。用 CLI `review mark` 或 web 复核页处理任一告警即视为已确认(ack),不再升级。
 
@@ -66,7 +69,7 @@ scheduler 启动时:若数据库未 bootstrap → 自动跑 180 天静默 backfi
 ```bash
 python -m ocoopa_monitor.cli doctor --production --json   # 上线自检
 python -m ocoopa_monitor.cli bootstrap                    # 静默冷启动(backfill 两车道 + 标记)
-python -m ocoopa_monitor.cli backfill --days 180          # 仅高敏车道回溯(也会标记 bootstrap)
+python -m ocoopa_monitor.cli backfill --days 180          # 仅高敏车道静默回溯(不会标记 bootstrap)
 python -m ocoopa_monitor.cli run-lane high                # 手动跑一次高敏车道
 python -m ocoopa_monitor.cli daily-report                 # 手动生成中文日报
 python -m ocoopa_monitor.cli health --json                # 抓取源健康检查
@@ -78,6 +81,10 @@ python -m ocoopa_monitor.cli keyword list                     # 列出全部监�
 python -m ocoopa_monitor.cli keyword add "<词>" --category legal --lane high  # 新增监控词(下次抓取即生效)
 python -m ocoopa_monitor.cli keyword disable "<词>"           # 停用某词
 python -m ocoopa_monitor.cli keyword enable "<词>"            # 重新启用
+python -m ocoopa_monitor.cli recall list --limit 200           # 召回专项统计表
+python -m ocoopa_monitor.cli recall import-group ./group.csv   # 登记群内已同步内容
+python -m ocoopa_monitor.cli recall export ./recall.csv        # 导出统一 CSV
+python -m ocoopa_monitor.cli recall sync --limit 10             # 队列补发/重试
 ```
 
 > **关键词热更新**:诉讼公开后冒出的律所名、案号、新型号,用 `keyword add` 加入即可,无需改代码或重部署,下一次车道抓取自动生效。
@@ -93,7 +100,7 @@ python -m ocoopa_monitor.cli keyword enable "<词>"            # 重新启用
   uvicorn ocoopa_monitor.api:app --host 0.0.0.0 --port $PORT
   ```
   (镜像已含 `[api]` 依赖。)
-- **必须设 `OCOOPA_REVIEW_TOKEN`**:该页是公网可变更端点,设置 token 后访问需带 `?token=<你的token>`(`/review?token=xxx`),未配置则不鉴权(仅限内网/调试)。
+- **必须设 `OCOOPA_REVIEW_TOKEN`**:生产 doctor 会阻止空 token。自动化调用优先使用 `Authorization: Bearer <token>`；现有浏览器页面仍兼容 `?token=<token>`，但查询参数可能进入访问日志，需避免转发完整 URL。
 - 把 `https://<服务域名>/review?token=xxx` 发给负责复核的同事收藏即可。
 
 ### 运营控制台(看板 / 检索 / 导出)
@@ -108,6 +115,7 @@ python -m ocoopa_monitor.cli keyword enable "<词>"            # 重新启用
 
 ## 5. 已知边界 / 待补
 
-- **集体诉讼招募源未接**:律师导流站白名单待法务批准后加入(免费 RSS/白名单抓取),目前该信号只能经新闻/搜索间接捕捉。
-- **中文社媒(小红书/微博/抖音)** 暂未覆盖,日报会标注该缺口。
-- 当前阶段为**有人盯的试运行**,建议每日浏览日报校验召回,而非完全无人值守依赖。
+- 钉钉自定义机器人只有发送能力；群历史需 CSV/JSONL 导入。要自动读群，必须另配经批准的钉钉应用与最小读取权限。
+- Reddit 已直连公共 Atom；公开网页由 Brave/SerpAPI/GNews/Google News 补充。Facebook、Instagram、TikTok、X、微博、小红书、抖音等关闭索引或需登录的内容，未获官方 API 权限前不能承诺“全量”。
+- 当前抓取以标题和公开摘要为主，不等同于全文归档。重要红色内容仍需人工打开原文复核。
+- 当前阶段为**有人盯的试运行**；建议每日检查源健康、未投递 outbox、召回台账和日报，不应作为完全无人值守系统。

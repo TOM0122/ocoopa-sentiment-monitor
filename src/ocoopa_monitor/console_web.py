@@ -66,8 +66,15 @@ def rows_to_csv(rows: Iterable[Any]) -> str:
     writer = csv.DictWriter(buf, fieldnames=CSV_COLUMNS, extrasaction="ignore")
     writer.writeheader()
     for r in _rows(rows):
-        writer.writerow({c: r.get(c) for c in CSV_COLUMNS})
+        writer.writerow({c: _csv_safe(r.get(c)) for c in CSV_COLUMNS})
     return buf.getvalue()
+
+
+def _csv_safe(value: Any) -> Any:
+    """Prevent untrusted titles/URLs from becoming spreadsheet formulas."""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
 
 
 def _q(token: str, **extra: Any) -> str:
