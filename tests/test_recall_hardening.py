@@ -178,7 +178,19 @@ class RecallHardeningTests(unittest.TestCase):
             pipeline.bootstrap(30)
         self.assertFalse(db.is_bootstrapped())
 
-    def test_outbox_retries_without_losing_alert(self):
+    def test_bootstrap_does_not_mark_unconfigured_optional_lanes_complete(self):
+        db, tmp = self.make_db(bootstrapped=False)
+        pipeline = MonitorPipeline(
+            db,
+            settings(tmp.name),
+            fetchers={"static": StaticFetcher([])},
+        )
+        pipeline.bootstrap(30)
+        self.assertTrue(db.is_bootstrapped())
+        self.assertIsNone(db.get_state("public_social_backfill_completed_at"))
+        self.assertIsNone(db.get_state("brandwatch_backfill_completed_at"))
+
+    def test_outbox_retries_without_losing_first_discovery_notice(self):
         db, tmp = self.make_db()
         channel = FlakyChannel()
         delivery = DeliveryClient(channel)
@@ -189,27 +201,33 @@ class RecallHardeningTests(unittest.TestCase):
             fetchers={"static": StaticFetcher([self.recall_item()])},
         )
         first = pipeline.run_lane("high")
-        self.assertEqual(first["alerts_created"], 1)
+        self.assertEqual(first["mention_batches_queued"], 1)
         self.assertEqual(first["deliveries_failed"], 1)
         with db.connect() as conn:
-            alert = conn.execute("SELECT sent_at FROM alerts").fetchone()
+            notice = conn.execute(
+                "SELECT delivery_status, delivered_at FROM mention_notifications"
+            ).fetchone()
             conn.execute(
                 "UPDATE delivery_outbox SET next_attempt_at=?",
                 ((utcnow() - timedelta(seconds=1)).isoformat(),),
             )
-        self.assertIsNone(alert["sent_at"])
+        self.assertEqual(notice["delivery_status"], "pending")
+        self.assertIsNone(notice["delivered_at"])
         retry = DeliveryOutboxWorker(db, delivery).drain()
         self.assertEqual(retry["sent"], 1)
         with db.connect() as conn:
-            alert = conn.execute("SELECT sent_at FROM alerts").fetchone()
-            count = conn.execute("SELECT COUNT(*) AS n FROM alerts").fetchone()["n"]
+            notice = conn.execute(
+                "SELECT delivery_status, delivered_at FROM mention_notifications"
+            ).fetchone()
+            count = conn.execute("SELECT COUNT(*) AS n FROM mention_notifications").fetchone()["n"]
             kinds = [
                 row["kind"]
                 for row in conn.execute("SELECT kind FROM delivery_outbox ORDER BY id").fetchall()
             ]
-        self.assertIsNotNone(alert["sent_at"])
+        self.assertEqual(notice["delivery_status"], "sent")
+        self.assertIsNotNone(notice["delivered_at"])
         self.assertEqual(count, 1)
-        self.assertEqual(kinds, ["red_alert"])
+        self.assertEqual(kinds, ["mention_batch"])
 
     def test_recall_registry_tracks_and_exports_new_external_item(self):
         db, tmp = self.make_db()
@@ -251,12 +269,14 @@ class RecallHardeningTests(unittest.TestCase):
 
         result = pipeline.run_lane("high")
 
-        self.assertEqual(result["recall_updates_queued"], 2)
+        self.assertEqual(result["mention_batches_queued"], 1)
+        self.assertEqual(result["recall_updates_queued"], 0)
         self.assertEqual(len(channel.payloads), 1)
         payload = channel.payloads[0]
         self.assertNotIn("_recall_record_ids", payload)
         self.assertIn("#### 总览", payload["text"])
-        self.assertIn("#### 核心结论", payload["text"])
+        self.assertIn("#### 重点信息", payload["text"])
+        self.assertIn("#### 下一步", payload["text"])
         self.assertIn("[链接](https://example.com/", payload["text"])
         self.assertNotIn("原文：https://", payload["text"])
         self.assertLess(len(payload["text"]), 8000)
@@ -265,7 +285,7 @@ class RecallHardeningTests(unittest.TestCase):
             jobs = conn.execute(
                 "SELECT kind, status FROM delivery_outbox ORDER BY id"
             ).fetchall()
-        self.assertEqual([(row["kind"], row["status"]) for row in jobs], [("recall_digest", "sent")])
+        self.assertEqual([(row["kind"], row["status"]) for row in jobs], [("mention_batch", "sent")])
 
     def test_pending_digest_is_not_duplicated_and_syncs_only_after_success(self):
         db, tmp = self.make_db()
@@ -285,7 +305,7 @@ class RecallHardeningTests(unittest.TestCase):
         with db.connect() as conn:
             self.assertEqual(
                 conn.execute(
-                    "SELECT COUNT(*) AS n FROM delivery_outbox WHERE kind='recall_digest'"
+                    "SELECT COUNT(*) AS n FROM delivery_outbox WHERE kind='mention_batch'"
                 ).fetchone()["n"],
                 1,
             )

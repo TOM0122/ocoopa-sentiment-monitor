@@ -22,10 +22,20 @@ Ocoopa 舆情与 PR 监控 Agent 的部署、冷启动与日常运行说明。
 | `OCOOPA_ALERT_WEBHOOK_URL` | 钉钉机器人 webhook |
 | `OCOOPA_ALERT_WEBHOOK_SECRET` | 钉钉加签 secret |
 | `OCOOPA_ALERT_AT_MOBILES` | 需要 @ 的负责人手机号(逗号分隔,可选) |
-| `OCOOPA_REVIEW_TOKEN` | 生产 web 全部读写/执行端点的 Bearer token(必需) |
+| `OCOOPA_REVIEW_TOKEN` | 页面首次登录口令，同时作为自动化 API Bearer 凭据(必须轮换已暴露值) |
+| `OCOOPA_SESSION_SECRET` | 独立的长随机会话签名密钥；不得与访问口令相同 |
+| `OCOOPA_ALLOW_QUERY_TOKEN` | 旧链接迁移阶段为 `true`，完成后必须改为 `false` |
 | `OCOOPA_BRAVE_SEARCH_API_KEY` / `OCOOPA_GNEWS_API_KEY` | 商业 API key(可选,见配额策略) |
+| `OCOOPA_BRANDWATCH_TOKEN` / `PROJECT_ID` / `QUERY_ID` | Brandwatch 只读试点凭据；三项齐全才启用 |
 
-> 部署前自检:`python -m ocoopa_monitor.cli doctor --production --json`,`ok=true` 方可上线。
+> 部署前按服务自检:`python -m ocoopa_monitor.cli doctor --production --role scheduler --json` 和 `python -m ocoopa_monitor.cli doctor --production --role web --json`,`ok=true` 方可上线。不要为通过检查而把 scheduler 密钥复制给 web，或把网页口令复制给 scheduler。
+
+### Railway 测试 PostgreSQL
+
+- 独立环境:`testing`;数据库服务:`Postgres-mK24`。不得把测试连接指向 `production / Postgres`。
+- 测试库只开放 Railway 私网,不保留公网 TCP Proxy。测试运行器必须与数据库位于同一 `testing` 环境,并以 `OCOOPA_TEST_POSTGRES_URL=${{Postgres-mK24.DATABASE_URL}}` 引用连接串。
+- PostgreSQL 专项命令:`python -m unittest tests.test_postgres_integration -v`;完整回归命令:`python -m unittest discover -s tests -v`。
+- 临时测试运行服务在完成后删除,测试数据库保留供后续迁移和兼容性复检。任何临时运行器不得复制生产钉钉、搜索或模型凭据。
 
 ## 2. 冷启动(首次上线 / 清空重跑)
 
@@ -52,7 +62,9 @@ scheduler 启动时:若数据库未 bootstrap → 自动跑 180 天静默 backfi
 
 - **高敏车道**每 15 分钟:Google News RSS + CPSC API + AboutLawsuits + Reddit Atom(免费、扛时效)。CPSC 旧检索 API 对新公告可能延迟，因此为 P1 补充源；P0 Google News 使用精确查询独立捕获 CPSC.gov 官方公告。
 - **常规车道**每小时:Brave / GNews / Google News RSS / PRNewswire。
-- **红色高危** → 实时推送钉钉群;`needs_human_review`(低置信/证据未完全校验)的红色仍推送,但文案标注「需人工核实」且不 @ 手机号。
+- **公开社媒发现**每小时:Brave 站点限定查询补充公开 TK / IG / FB / YouTube / X / Reddit / 论坛 / 评论页；新版本首次启动先静默回溯 30 天。
+- **持牌社媒车道**每 5 分钟:仅在 Brandwatch 三项凭据齐全时启用；按增量窗口轮询并以 `resourceId` 去重，首次启用先静默回溯 30 天。
+- **每条有效首次发现** → 系统收到后立即写入 outbox；同事件同轮多链接合并。仅新伤亡/起火/监管法律动作或高传播内容允许 @；`needs_human_review` 仍推送但不 @。
 - **每日 09:00 后(北京时间)** 生成并**推送**中文日报到钉钉(routine 推送,不 @ 手机号)。完成日期持久化；重启错过 09:00 窗口会自动补发。
 - **召回专项同步**:命中 CPSC 26-659/受影响型号的每条内容进入 `recall_mentions` 统计表。红色内容走告警；其他内容以 routine 消息同步群。所有消息先写 `delivery_outbox`,失败指数退避重试。
 - **首次升级迁移**:scheduler 会把升级前数据库中已出现在群日报的召回内容补登记为 `synced`,避免部署后把历史内容逐条重新刷屏；升级后新发现的内容仍实时入队。
@@ -67,8 +79,9 @@ scheduler 启动时:若数据库未 bootstrap → 自动跑 180 天静默 backfi
 ## 4. 常用命令
 
 ```bash
-python -m ocoopa_monitor.cli doctor --production --json   # 上线自检
-python -m ocoopa_monitor.cli bootstrap                    # 静默冷启动(backfill 两车道 + 标记)
+python -m ocoopa_monitor.cli doctor --production --role scheduler --json  # scheduler 上线自检
+python -m ocoopa_monitor.cli doctor --production --role web --json        # web 上线自检
+python -m ocoopa_monitor.cli bootstrap                    # 静默冷启动(backfill high/regular/licensed + 标记)
 python -m ocoopa_monitor.cli backfill --days 180          # 仅高敏车道静默回溯(不会标记 bootstrap)
 python -m ocoopa_monitor.cli run-lane high                # 手动跑一次高敏车道
 python -m ocoopa_monitor.cli daily-report                 # 手动生成中文日报
@@ -100,22 +113,24 @@ python -m ocoopa_monitor.cli recall sync --limit 10             # 队列补发/�
   uvicorn ocoopa_monitor.api:app --host 0.0.0.0 --port $PORT
   ```
   (镜像已含 `[api]` 依赖。)
-- **必须设 `OCOOPA_REVIEW_TOKEN`**:生产 doctor 会阻止空 token。自动化调用优先使用 `Authorization: Bearer <token>`；现有浏览器页面仍兼容 `?token=<token>`，但查询参数可能进入访问日志，需避免转发完整 URL。
-- 把 `https://<服务域名>/review?token=xxx` 发给负责复核的同事收藏即可。
+- **必须同时设置 `OCOOPA_REVIEW_TOKEN` 和与其不同的 `OCOOPA_SESSION_SECRET`**。页面从 `/auth/login` 登录，Cookie 为 `HttpOnly + Secure + SameSite=Lax`；写操作校验 CSRF。自动化接口只使用 `Authorization: Bearer <token>`，不接受 URL 查询参数凭据。
+- 旧 `?token=` 链接只在迁移期开启：验证后签发会话并重定向到干净地址。确认同事均完成迁移后，轮换访问口令并设置 `OCOOPA_ALLOW_QUERY_TOKEN=false`。
+- 分享地址只使用 `https://<服务域名>/review`，不要再发送带 token 的链接。
 
 ### 运营控制台(看板 / 检索 / 导出)
 
 同一个 web 服务还提供给法务/PR/高层看的只读控制台(同样用 `OCOOPA_REVIEW_TOKEN` 鉴权):
 
-- **分析看板** `GET /review/analysis?token=xxx&days=30`:近 N 个北京时间自然日的每日新增/红黄风险走线、关键词与议题归纳、情感/来源结构、管理摘要和规则化下一步建议。复核页顶部可直接切换进入；旧地址 `/dashboard` 保持兼容。
-- **检索** `GET /console/search?token=xxx&q=<关键词>&risk=<red|yellow|green>&days=30`:按关键词/风险等级过滤,看标题、来源、摘要、链接。
-- **导出 CSV** `GET /console/export.csv?token=xxx&days=30`:导出该时间窗内全部提及(含风险/情感/分类/摘要/证据状态),给法务做可追溯报告。
+- **分析看板** `GET /review/analysis?days=30`:发布量与发现工作量双走线、平台趋势、跨平台扩散、关键词/议题、互动榜、处置状态和覆盖/延迟矩阵；旧地址 `/dashboard` 保持兼容。
+- **检索** `GET /console/search?q=<关键词>&risk=<red|yellow|green>&days=30`。
+- **导出 CSV** `GET /console/export.csv?days=30`:包含平台、供应商身份、发现延迟、互动快照、主题与回应状态。
 
 > 控制台是只读聚合,不改数据;反馈仍在 `/review` 或 CLI 进行。`days` 默认 30,可调。分析结论只基于当前收录、机器分类和证据状态，不替代法务事实认定；当日数据为截至访问时的部分数据。
 
 ## 5. 已知边界 / 待补
 
 - 钉钉自定义机器人只有发送能力；群历史需 CSV/JSONL 导入。要自动读群，必须另配经批准的钉钉应用与最小读取权限。
-- Reddit 已直连公共 Atom；公开网页由 Brave/SerpAPI/GNews/Google News 补充。Facebook、Instagram、TikTok、X、微博、小红书、抖音等关闭索引或需登录的内容，未获官方 API 权限前不能承诺“全量”。
+- Reddit 已直连公共 Atom；Brave 发现公开索引社媒页；Brandwatch 仅在试点凭据启用后提供持牌补充。Facebook、Instagram、TikTok 的非官号覆盖均非全量；零记录只表示当前数据源未发现，不能解释为平台没有讨论。
+- 不抓私密账号、登录后未授权内容；不保存头像、简介、粉丝关系；系统没有评论、发帖、点赞、隐藏或删除接口。
 - 当前抓取以标题和公开摘要为主，不等同于全文归档。重要红色内容仍需人工打开原文复核。
 - 当前阶段为**有人盯的试运行**；建议每日检查源健康、未投递 outbox、召回台账和日报，不应作为完全无人值守系统。

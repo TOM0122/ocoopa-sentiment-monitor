@@ -60,6 +60,35 @@ class Database:
     def _migrate_sqlite(self, conn: sqlite3.Connection) -> None:
         self._add_column_if_missing(conn, "alerts", "delivery_latency_seconds", "INTEGER")
         self._add_column_if_missing(conn, "incident_groups", "muted_until", "TEXT")
+        for column, column_type in (
+            ("platform", "TEXT NOT NULL DEFAULT 'web'"),
+            ("content_type", "TEXT NOT NULL DEFAULT 'article'"),
+            ("provider", "TEXT NOT NULL DEFAULT ''"),
+            ("provider_item_id", "TEXT NOT NULL DEFAULT ''"),
+            ("parent_url", "TEXT NOT NULL DEFAULT ''"),
+            ("discovery_method", "TEXT NOT NULL DEFAULT 'public_feed'"),
+            ("coverage_tier", "TEXT NOT NULL DEFAULT 'public_index'"),
+            ("provider_added_at", "TEXT"),
+            ("discovery_latency_seconds", "INTEGER"),
+            ("view_count", "INTEGER"),
+            ("like_count", "INTEGER"),
+            ("comment_count", "INTEGER"),
+            ("share_count", "INTEGER"),
+        ):
+            self._add_column_if_missing(conn, "mentions", column, column_type)
+        for column, column_type in (
+            ("campaign", "TEXT NOT NULL DEFAULT 'brand_major_risk'"),
+            ("relevance", "REAL NOT NULL DEFAULT 0"),
+            ("novelty_type", "TEXT NOT NULL DEFAULT 'new_mention'"),
+            ("notification_priority", "TEXT NOT NULL DEFAULT 'standard'"),
+            ("recommended_action", "TEXT NOT NULL DEFAULT 'monitor'"),
+        ):
+            self._add_column_if_missing(conn, "analysis_results", column, column_type)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_mentions_provider_item "
+            "ON mentions(provider, provider_item_id) "
+            "WHERE provider <> '' AND provider_item_id <> ''"
+        )
 
     @staticmethod
     def _add_column_if_missing(
@@ -292,13 +321,27 @@ class Database:
                 unhealthy.append(dict(row))
         return unhealthy
 
+    def list_source_health(self) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM source_health ORDER BY priority, source_name"
+            ).fetchall()]
+
     def upsert_mention(self, mention: Mention) -> Mention:
         now = dt_to_str(utcnow())
         with self.connect() as conn:
-            existing = conn.execute(
-                "SELECT id, content_hash, first_seen_at FROM mentions WHERE canonical_url=?",
-                (mention.canonical_url,),
-            ).fetchone()
+            existing = None
+            if mention.provider and mention.provider_item_id:
+                existing = conn.execute(
+                    "SELECT id, content_hash, first_seen_at FROM mentions "
+                    "WHERE provider=? AND provider_item_id=?",
+                    (mention.provider, mention.provider_item_id),
+                ).fetchone()
+            if existing is None:
+                existing = conn.execute(
+                    "SELECT id, content_hash, first_seen_at FROM mentions WHERE canonical_url=?",
+                    (mention.canonical_url,),
+                ).fetchone()
             if existing:
                 mention.id = int(existing["id"])
                 mention.is_new = False
@@ -309,7 +352,10 @@ class Database:
                     UPDATE mentions SET
                         title=?, raw_text=?, text_excerpt=?, matched_keywords=?,
                         content_hash=?, event_fingerprint=?, is_new=0, is_updated=?,
-                        backfill=backfill AND ?, fetched_at=?, updated_at=?
+                        backfill=backfill AND ?, fetched_at=?, platform=?, content_type=?,
+                        provider=?, provider_item_id=?, parent_url=?, discovery_method=?,
+                        coverage_tier=?, provider_added_at=?, discovery_latency_seconds=?,
+                        view_count=?, like_count=?, comment_count=?, share_count=?, updated_at=?
                     WHERE id=?
                     """,
                     (
@@ -322,6 +368,19 @@ class Database:
                         int(mention.is_updated),
                         int(mention.backfill),
                         dt_to_str(mention.fetched_at),
+                        mention.platform,
+                        mention.content_type,
+                        mention.provider,
+                        mention.provider_item_id,
+                        mention.parent_url,
+                        mention.discovery_method,
+                        mention.coverage_tier,
+                        dt_to_str(mention.provider_added_at),
+                        mention.discovery_latency_seconds,
+                        mention.view_count,
+                        mention.like_count,
+                        mention.comment_count,
+                        mention.share_count,
                         now,
                         mention.id,
                     ),
@@ -335,9 +394,12 @@ class Database:
                     author_or_publisher, published_at, fetched_at, first_seen_at,
                     language, country_or_market, raw_text, text_excerpt, matched_keywords,
                     content_hash, event_fingerprint, duplicate_group_id, is_new, is_updated,
-                    backfill, tos_method, fetch_status, fetch_error, created_at, updated_at
+                    backfill, tos_method, fetch_status, fetch_error, platform, content_type,
+                    provider, provider_item_id, parent_url, discovery_method, coverage_tier,
+                    provider_added_at, discovery_latency_seconds, view_count, like_count,
+                    comment_count, share_count, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     mention.source_type,
@@ -363,6 +425,19 @@ class Database:
                     mention.tos_method,
                     mention.fetch_status,
                     mention.fetch_error,
+                    mention.platform,
+                    mention.content_type,
+                    mention.provider,
+                    mention.provider_item_id,
+                    mention.parent_url,
+                    mention.discovery_method,
+                    mention.coverage_tier,
+                    dt_to_str(mention.provider_added_at),
+                    mention.discovery_latency_seconds,
+                    mention.view_count,
+                    mention.like_count,
+                    mention.comment_count,
+                    mention.share_count,
                     now,
                     now,
                 ),
@@ -379,9 +454,10 @@ class Database:
                     risk_level, category, summary_zh, key_quotes, key_quote_offsets,
                     requires_escalation, escalation_reason, confidence,
                     evidence_check_passed, evidence_check_notes, needs_human_review,
-                    analysis_created_at, review_status
+                    analysis_created_at, review_status, campaign, relevance, novelty_type,
+                    notification_priority, recommended_action
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     result.mention_id,
@@ -402,6 +478,11 @@ class Database:
                     int(result.needs_human_review),
                     dt_to_str(result.analysis_created_at),
                     result.review_status,
+                    result.campaign,
+                    result.relevance,
+                    result.novelty_type,
+                    result.notification_priority,
+                    result.recommended_action,
                 ),
             )
             result.id = int(cur.lastrowid)
@@ -660,6 +741,23 @@ class Database:
                         """,
                         (dt_to_str(sent_at), dt_to_str(sent_at), *record_ids),
                     )
+            if row and row["entity_type"] == "mention_batch":
+                payload = json.loads(row["payload_json"])
+                mention_ids = [int(value) for value in payload.get("_mention_ids", []) if str(value).isdigit()]
+                if mention_ids:
+                    placeholders = ",".join("?" for _ in mention_ids)
+                    conn.execute(
+                        f"UPDATE mention_notifications SET delivery_status='sent', delivered_at=?, updated_at=? WHERE mention_id IN ({placeholders})",
+                        (dt_to_str(sent_at), dt_to_str(sent_at), *mention_ids),
+                    )
+                    conn.execute(
+                        f"UPDATE recall_mentions SET sync_status='synced', synced_at=?, updated_at=? WHERE mention_id IN ({placeholders})",
+                        (dt_to_str(sent_at), dt_to_str(sent_at), *mention_ids),
+                    )
+                    conn.execute(
+                        f"UPDATE alerts SET sent_to=?, sent_at=? WHERE mention_id IN ({placeholders}) AND sent_at IS NULL",
+                        (sent_to, dt_to_str(sent_at), *mention_ids),
+                    )
 
     def supersede_pending_recall_updates(self) -> int:
         """Retire legacy one-item jobs without marking their registry rows synced."""
@@ -758,7 +856,10 @@ class Database:
                        a.confidence, a.evidence_check_passed, a.needs_human_review,
                        EXISTS(
                            SELECT 1 FROM alerts alert WHERE alert.mention_id=m.id
-                       ) AS has_alert
+                       ) AS has_alert,
+                       EXISTS(
+                           SELECT 1 FROM mention_notifications n WHERE n.mention_id=m.id
+                       ) AS has_mention_notification
                 FROM recall_mentions r
                 JOIN mentions m ON m.id=r.mention_id
                 LEFT JOIN analysis_results a ON a.id=(
@@ -902,6 +1003,128 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def record_interaction_snapshot(self, mention: Mention) -> Optional[Dict[str, Any]]:
+        if mention.id is None or all(
+            value is None
+            for value in (mention.view_count, mention.like_count, mention.comment_count, mention.share_count)
+        ):
+            return None
+        with self.connect() as conn:
+            previous = conn.execute(
+                "SELECT view_count, like_count, comment_count, share_count, captured_at "
+                "FROM mention_metrics WHERE mention_id=? ORDER BY id DESC LIMIT 1",
+                (mention.id,),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO mention_metrics(mention_id, view_count, like_count, comment_count, share_count, captured_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (mention.id, mention.view_count, mention.like_count, mention.comment_count, mention.share_count, dt_to_str(mention.fetched_at)),
+            )
+        return dict(previous) if previous else None
+
+    def ensure_mention_action(self, mention_id: int, guidance: Dict[str, str]) -> None:
+        now = dt_to_str(utcnow())
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO mention_actions(
+                    mention_id, intervention_reason, draft_original, draft_zh,
+                    legal_risk_note, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(mention_id) DO NOTHING
+                """,
+                (
+                    mention_id,
+                    guidance.get("intervention_reason", ""),
+                    guidance.get("draft_original", ""),
+                    guidance.get("draft_zh", ""),
+                    guidance.get("legal_risk_note", ""),
+                    now,
+                    now,
+                ),
+            )
+
+    def update_mention_action(
+        self, mention_id: int, status: str, response_url: str, internal_note: str, operator: str
+    ) -> bool:
+        if status not in MENTION_ACTION_STATUSES:
+            raise ValueError(f"invalid mention action status: {status}")
+        now = dt_to_str(utcnow())
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE mention_actions SET status=?, response_url=?, internal_note=?,
+                    operator=?, acted_at=?, updated_at=? WHERE mention_id=?
+                """,
+                (status, response_url[:2000], internal_note[:4000], operator[:200], now, now, mention_id),
+            )
+            return cur.rowcount > 0
+
+    def enqueue_mention_batch(
+        self, mention_ids: List[int], priority: str, payload: Dict[str, Any]
+    ) -> bool:
+        ids = sorted(set(int(value) for value in mention_ids))
+        if not ids:
+            return False
+        now = dt_to_str(utcnow())
+        dedupe_key = "mentions:first:" + ",".join(str(value) for value in ids)
+        with self.connect() as conn:
+            new_ids = []
+            for mention_id in ids:
+                cur = conn.execute(
+                    """
+                    INSERT INTO mention_notifications(
+                        mention_id, notification_priority, delivery_status,
+                        outbox_dedupe_key, created_at, updated_at
+                    ) VALUES (?, ?, 'pending', ?, ?, ?)
+                    ON CONFLICT(mention_id) DO NOTHING
+                    """,
+                    (mention_id, priority, dedupe_key, now, now),
+                )
+                if cur.rowcount:
+                    new_ids.append(mention_id)
+            if not new_ids:
+                return False
+            batch_key = "mentions:first:" + ",".join(str(value) for value in new_ids)
+            payload = dict(payload)
+            payload["_mention_ids"] = new_ids
+            conn.execute(
+                """
+                INSERT INTO delivery_outbox(
+                    kind, dedupe_key, entity_type, entity_id, payload_json,
+                    status, attempt_count, next_attempt_at, created_at, updated_at
+                ) VALUES ('mention_batch', ?, 'mention_batch', ?, ?, 'pending', 0, ?, ?, ?)
+                ON CONFLICT(dedupe_key) DO NOTHING
+                """,
+                (batch_key, new_ids[0], json.dumps(payload, ensure_ascii=False), now, now, now),
+            )
+            conn.executemany(
+                "UPDATE mention_notifications SET outbox_dedupe_key=? WHERE mention_id=?",
+                [(batch_key, mention_id) for mention_id in new_ids],
+            )
+        return True
+
+    def list_recent_incidents_detailed(self, limit: int = 50) -> List[Dict[str, Any]]:
+        incidents = self.list_recent_incidents(limit)
+        with self.connect() as conn:
+            for incident in incidents:
+                rows = conn.execute(
+                    """
+                    SELECT m.*, a.summary_zh, a.risk_level, a.campaign, a.relevance,
+                           a.novelty_type, a.notification_priority, a.recommended_action,
+                           x.status AS response_status, x.response_url, x.internal_note,
+                           x.operator, x.intervention_reason, x.draft_original, x.draft_zh,
+                           x.legal_risk_note, x.acted_at
+                    FROM mentions m
+                    LEFT JOIN analysis_results a ON a.id=(SELECT id FROM analysis_results WHERE mention_id=m.id ORDER BY id DESC LIMIT 1)
+                    LEFT JOIN mention_actions x ON x.mention_id=m.id
+                    WHERE m.event_fingerprint=? ORDER BY COALESCE(m.published_at, m.fetched_at) DESC
+                    """,
+                    (incident["fingerprint"],),
+                ).fetchall()
+                incident["mentions"] = [dict(row) for row in rows]
+        return incidents
+
     # --- Incident-level review (red/yellow events, even if never alerted) ---
     def list_recent_incidents(self, limit: int = 50) -> List[Dict[str, Any]]:
         with self.connect() as conn:
@@ -946,12 +1169,19 @@ class Database:
                 """
                 SELECT m.*, a.sentiment, a.risk_level, a.category, a.summary_zh,
                        a.escalation_reason, a.confidence, a.evidence_check_passed,
-                       a.needs_human_review
+                       a.needs_human_review, a.campaign, a.relevance, a.novelty_type,
+                       a.notification_priority, a.recommended_action,
+                       x.status AS response_status, x.acted_at,
+                       n.delivery_status AS notification_status,
+                       n.created_at AS notification_created_at,
+                       n.delivered_at AS notification_delivered_at
                 FROM mentions m
                 LEFT JOIN analysis_results a ON a.id=(
                     SELECT id FROM analysis_results
                     WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
                 )
+                LEFT JOIN mention_actions x ON x.mention_id=m.id
+                LEFT JOIN mention_notifications n ON n.mention_id=m.id
                 WHERE substr(m.fetched_at, 1, 10)=?
                 ORDER BY
                     CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
@@ -966,12 +1196,19 @@ class Database:
                 """
                 SELECT m.*, a.sentiment, a.risk_level, a.category, a.summary_zh,
                        a.escalation_reason, a.confidence, a.evidence_check_passed,
-                       a.needs_human_review
+                       a.needs_human_review, a.campaign, a.relevance, a.novelty_type,
+                       a.notification_priority, a.recommended_action,
+                       x.status AS response_status, x.acted_at,
+                       n.delivery_status AS notification_status,
+                       n.created_at AS notification_created_at,
+                       n.delivered_at AS notification_delivered_at
                 FROM mentions m
                 LEFT JOIN analysis_results a ON a.id=(
                     SELECT id FROM analysis_results
                     WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
                 )
+                LEFT JOIN mention_actions x ON x.mention_id=m.id
+                LEFT JOIN mention_notifications n ON n.mention_id=m.id
                 WHERE m.fetched_at >= ? AND m.fetched_at < ?
                 ORDER BY
                     CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
@@ -1047,12 +1284,12 @@ class PostgresDatabase:
     )
 
     def init(self) -> None:
-        migration = _postgres_migration_sql()
         with self.connect() as conn:
-            for statement in migration.split(";"):
-                statement = statement.strip()
-                if statement:
-                    conn.execute(statement)
+            for migration in _postgres_migration_sqls():
+                for statement in migration.split(";"):
+                    statement = statement.strip()
+                    if statement:
+                        conn.execute(statement)
             for statement in self._PG_COLUMN_MIGRATIONS:
                 conn.execute(statement)
 
@@ -1274,14 +1511,28 @@ class PostgresDatabase:
                 unhealthy.append(dict(row))
         return unhealthy
 
+    def list_source_health(self) -> List[Dict[str, Any]]:
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM source_health ORDER BY priority, source_name"
+            ).fetchall()]
+
     def upsert_mention(self, mention: Mention) -> Mention:
         _, _, Json = self._pg_modules()
         now = utcnow()
         with self.connect() as conn:
-            existing = conn.execute(
-                "SELECT id, content_hash, first_seen_at FROM mentions WHERE canonical_url=%s",
-                (mention.canonical_url,),
-            ).fetchone()
+            existing = None
+            if mention.provider and mention.provider_item_id:
+                existing = conn.execute(
+                    "SELECT id, content_hash, first_seen_at FROM mentions "
+                    "WHERE provider=%s AND provider_item_id=%s",
+                    (mention.provider, mention.provider_item_id),
+                ).fetchone()
+            if existing is None:
+                existing = conn.execute(
+                    "SELECT id, content_hash, first_seen_at FROM mentions WHERE canonical_url=%s",
+                    (mention.canonical_url,),
+                ).fetchone()
             if existing:
                 mention.id = int(existing["id"])
                 mention.is_new = False
@@ -1292,7 +1543,10 @@ class PostgresDatabase:
                     UPDATE mentions SET
                         title=%s, raw_text=%s, text_excerpt=%s, matched_keywords=%s,
                         content_hash=%s, event_fingerprint=%s, is_new=FALSE, is_updated=%s,
-                        backfill=backfill AND %s, fetched_at=%s, updated_at=%s
+                        backfill=backfill AND %s, fetched_at=%s, platform=%s, content_type=%s,
+                        provider=%s, provider_item_id=%s, parent_url=%s, discovery_method=%s,
+                        coverage_tier=%s, provider_added_at=%s, discovery_latency_seconds=%s,
+                        view_count=%s, like_count=%s, comment_count=%s, share_count=%s, updated_at=%s
                     WHERE id=%s
                     """,
                     (
@@ -1305,6 +1559,19 @@ class PostgresDatabase:
                         mention.is_updated,
                         mention.backfill,
                         mention.fetched_at,
+                        mention.platform,
+                        mention.content_type,
+                        mention.provider,
+                        mention.provider_item_id,
+                        mention.parent_url,
+                        mention.discovery_method,
+                        mention.coverage_tier,
+                        mention.provider_added_at,
+                        mention.discovery_latency_seconds,
+                        mention.view_count,
+                        mention.like_count,
+                        mention.comment_count,
+                        mention.share_count,
                         now,
                         mention.id,
                     ),
@@ -1317,9 +1584,12 @@ class PostgresDatabase:
                     author_or_publisher, published_at, fetched_at, first_seen_at,
                     language, country_or_market, raw_text, text_excerpt, matched_keywords,
                     content_hash, event_fingerprint, duplicate_group_id, is_new, is_updated,
-                    backfill, tos_method, fetch_status, fetch_error, created_at, updated_at
+                    backfill, tos_method, fetch_status, fetch_error, platform, content_type,
+                    provider, provider_item_id, parent_url, discovery_method, coverage_tier,
+                    provider_added_at, discovery_latency_seconds, view_count, like_count,
+                    comment_count, share_count, created_at, updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -1346,6 +1616,19 @@ class PostgresDatabase:
                     mention.tos_method,
                     mention.fetch_status,
                     mention.fetch_error,
+                    mention.platform,
+                    mention.content_type,
+                    mention.provider,
+                    mention.provider_item_id,
+                    mention.parent_url,
+                    mention.discovery_method,
+                    mention.coverage_tier,
+                    mention.provider_added_at,
+                    mention.discovery_latency_seconds,
+                    mention.view_count,
+                    mention.like_count,
+                    mention.comment_count,
+                    mention.share_count,
                     now,
                     now,
                 ),
@@ -1363,9 +1646,10 @@ class PostgresDatabase:
                     risk_level, category, summary_zh, key_quotes, key_quote_offsets,
                     requires_escalation, escalation_reason, confidence,
                     evidence_check_passed, evidence_check_notes, needs_human_review,
-                    analysis_created_at, review_status
+                    analysis_created_at, review_status, campaign, relevance, novelty_type,
+                    notification_priority, recommended_action
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -1387,6 +1671,11 @@ class PostgresDatabase:
                     result.needs_human_review,
                     result.analysis_created_at,
                     result.review_status,
+                    result.campaign,
+                    result.relevance,
+                    result.novelty_type,
+                    result.notification_priority,
+                    result.recommended_action,
                 ),
             ).fetchone()
             result.id = int(row["id"])
@@ -1621,6 +1910,23 @@ class PostgresDatabase:
                         """,
                         (sent_at, sent_at, record_ids),
                     )
+            if row and row["entity_type"] == "mention_batch":
+                raw_payload = row["payload_json"]
+                payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+                mention_ids = [int(value) for value in payload.get("_mention_ids", []) if str(value).isdigit()]
+                if mention_ids:
+                    conn.execute(
+                        "UPDATE mention_notifications SET delivery_status='sent', delivered_at=%s, updated_at=%s WHERE mention_id = ANY(%s)",
+                        (sent_at, sent_at, mention_ids),
+                    )
+                    conn.execute(
+                        "UPDATE recall_mentions SET sync_status='synced', synced_at=%s, updated_at=%s WHERE mention_id = ANY(%s)",
+                        (sent_at, sent_at, mention_ids),
+                    )
+                    conn.execute(
+                        "UPDATE alerts SET sent_to=%s, sent_at=%s WHERE mention_id = ANY(%s) AND sent_at IS NULL",
+                        (sent_to, sent_at, mention_ids),
+                    )
 
     def supersede_pending_recall_updates(self) -> int:
         """Retire legacy one-item jobs without marking their registry rows synced."""
@@ -1699,7 +2005,10 @@ class PostgresDatabase:
                        a.confidence, a.evidence_check_passed, a.needs_human_review,
                        EXISTS(
                            SELECT 1 FROM alerts alert WHERE alert.mention_id=m.id
-                       ) AS has_alert
+                       ) AS has_alert,
+                       EXISTS(
+                           SELECT 1 FROM mention_notifications n WHERE n.mention_id=m.id
+                       ) AS has_mention_notification
                 FROM recall_mentions r
                 JOIN mentions m ON m.id=r.mention_id
                 LEFT JOIN analysis_results a ON a.id=(
@@ -1843,6 +2152,119 @@ class PostgresDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def record_interaction_snapshot(self, mention: Mention) -> Optional[Dict[str, Any]]:
+        if mention.id is None or all(
+            value is None
+            for value in (mention.view_count, mention.like_count, mention.comment_count, mention.share_count)
+        ):
+            return None
+        with self.connect() as conn:
+            previous = conn.execute(
+                "SELECT view_count, like_count, comment_count, share_count, captured_at "
+                "FROM mention_metrics WHERE mention_id=%s ORDER BY id DESC LIMIT 1",
+                (mention.id,),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO mention_metrics(mention_id, view_count, like_count, comment_count, share_count, captured_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (mention.id, mention.view_count, mention.like_count, mention.comment_count, mention.share_count, mention.fetched_at),
+            )
+        return dict(previous) if previous else None
+
+    def ensure_mention_action(self, mention_id: int, guidance: Dict[str, str]) -> None:
+        now = utcnow()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO mention_actions(
+                    mention_id, intervention_reason, draft_original, draft_zh,
+                    legal_risk_note, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(mention_id) DO NOTHING
+                """,
+                (mention_id, guidance.get("intervention_reason", ""), guidance.get("draft_original", ""),
+                 guidance.get("draft_zh", ""), guidance.get("legal_risk_note", ""), now, now),
+            )
+
+    def update_mention_action(
+        self, mention_id: int, status: str, response_url: str, internal_note: str, operator: str
+    ) -> bool:
+        if status not in MENTION_ACTION_STATUSES:
+            raise ValueError(f"invalid mention action status: {status}")
+        now = utcnow()
+        with self.connect() as conn:
+            cur = conn.execute(
+                "UPDATE mention_actions SET status=%s, response_url=%s, internal_note=%s, "
+                "operator=%s, acted_at=%s, updated_at=%s WHERE mention_id=%s",
+                (status, response_url[:2000], internal_note[:4000], operator[:200], now, now, mention_id),
+            )
+            return cur.rowcount > 0
+
+    def enqueue_mention_batch(
+        self, mention_ids: List[int], priority: str, payload: Dict[str, Any]
+    ) -> bool:
+        ids = sorted(set(int(value) for value in mention_ids))
+        if not ids:
+            return False
+        now = utcnow()
+        provisional_key = "mentions:first:" + ",".join(str(value) for value in ids)
+        with self.connect() as conn:
+            new_ids = []
+            for mention_id in ids:
+                cur = conn.execute(
+                    """
+                    INSERT INTO mention_notifications(
+                        mention_id, notification_priority, delivery_status,
+                        outbox_dedupe_key, created_at, updated_at
+                    ) VALUES (%s, %s, 'pending', %s, %s, %s)
+                    ON CONFLICT(mention_id) DO NOTHING
+                    """,
+                    (mention_id, priority, provisional_key, now, now),
+                )
+                if cur.rowcount:
+                    new_ids.append(mention_id)
+            if not new_ids:
+                return False
+            batch_key = "mentions:first:" + ",".join(str(value) for value in new_ids)
+            public_payload = dict(payload)
+            public_payload["_mention_ids"] = new_ids
+            conn.execute(
+                """
+                INSERT INTO delivery_outbox(
+                    kind, dedupe_key, entity_type, entity_id, payload_json,
+                    status, attempt_count, next_attempt_at, created_at, updated_at
+                ) VALUES ('mention_batch', %s, 'mention_batch', %s, %s, 'pending', 0, %s, %s, %s)
+                ON CONFLICT(dedupe_key) DO NOTHING
+                """,
+                (batch_key, new_ids[0], json.dumps(public_payload, ensure_ascii=False), now, now, now),
+            )
+            conn.execute(
+                "UPDATE mention_notifications SET outbox_dedupe_key=%s WHERE mention_id = ANY(%s)",
+                (batch_key, new_ids),
+            )
+        return True
+
+    def list_recent_incidents_detailed(self, limit: int = 50) -> List[Dict[str, Any]]:
+        incidents = self.list_recent_incidents(limit)
+        with self.connect() as conn:
+            for incident in incidents:
+                rows = conn.execute(
+                    """
+                    SELECT m.*, a.summary_zh, a.risk_level, a.campaign, a.relevance,
+                           a.novelty_type, a.notification_priority, a.recommended_action,
+                           x.status AS response_status, x.response_url, x.internal_note,
+                           x.operator, x.intervention_reason, x.draft_original, x.draft_zh,
+                           x.legal_risk_note, x.acted_at
+                    FROM mentions m
+                    LEFT JOIN analysis_results a ON a.id=(SELECT id FROM analysis_results WHERE mention_id=m.id ORDER BY id DESC LIMIT 1)
+                    LEFT JOIN mention_actions x ON x.mention_id=m.id
+                    WHERE m.event_fingerprint=%s ORDER BY COALESCE(m.published_at, m.fetched_at) DESC
+                    """,
+                    (incident["fingerprint"],),
+                ).fetchall()
+                incident["mentions"] = [dict(row) for row in rows]
+        return incidents
+
     # --- Incident-level review (red/yellow events, even if never alerted) ---
     def list_recent_incidents(self, limit: int = 50) -> List[Dict[str, Any]]:
         with self.connect() as conn:
@@ -1887,12 +2309,19 @@ class PostgresDatabase:
                 """
                 SELECT m.*, a.sentiment, a.risk_level, a.category, a.summary_zh,
                        a.escalation_reason, a.confidence, a.evidence_check_passed,
-                       a.needs_human_review
+                       a.needs_human_review, a.campaign, a.relevance, a.novelty_type,
+                       a.notification_priority, a.recommended_action,
+                       x.status AS response_status, x.acted_at,
+                       n.delivery_status AS notification_status,
+                       n.created_at AS notification_created_at,
+                       n.delivered_at AS notification_delivered_at
                 FROM mentions m
                 LEFT JOIN analysis_results a ON a.id=(
                     SELECT id FROM analysis_results
                     WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
                 )
+                LEFT JOIN mention_actions x ON x.mention_id=m.id
+                LEFT JOIN mention_notifications n ON n.mention_id=m.id
                 WHERE m.fetched_at >= %s AND m.fetched_at < %s
                 ORDER BY
                     CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
@@ -1907,12 +2336,19 @@ class PostgresDatabase:
                 """
                 SELECT m.*, a.sentiment, a.risk_level, a.category, a.summary_zh,
                        a.escalation_reason, a.confidence, a.evidence_check_passed,
-                       a.needs_human_review
+                       a.needs_human_review, a.campaign, a.relevance, a.novelty_type,
+                       a.notification_priority, a.recommended_action,
+                       x.status AS response_status, x.acted_at,
+                       n.delivery_status AS notification_status,
+                       n.created_at AS notification_created_at,
+                       n.delivered_at AS notification_delivered_at
                 FROM mentions m
                 LEFT JOIN analysis_results a ON a.id=(
                     SELECT id FROM analysis_results
                     WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
                 )
+                LEFT JOIN mention_actions x ON x.mention_id=m.id
+                LEFT JOIN mention_notifications n ON n.mention_id=m.id
                 WHERE m.fetched_at >= %s::date AND m.fetched_at < (%s::date + INTERVAL '1 day')
                 ORDER BY
                     CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
@@ -1978,9 +2414,9 @@ class PostgresDatabase:
         return psycopg, dict_row, Jsonb
 
 
-def _postgres_migration_sql() -> str:
-    migration_path = Path(__file__).resolve().parents[2] / "migrations" / "001_initial_postgres.sql"
-    return migration_path.read_text(encoding="utf-8")
+def _postgres_migration_sqls() -> List[str]:
+    migrations_dir = Path(__file__).resolve().parents[2] / "migrations"
+    return [path.read_text(encoding="utf-8") for path in sorted(migrations_dir.glob("*.sql"))]
 
 
 def max_risk(left: str, right: str) -> str:
@@ -1989,6 +2425,7 @@ def max_risk(left: str, right: str) -> str:
 
 
 REVIEW_STATUSES = ("confirmed", "false_positive", "muted")
+MENTION_ACTION_STATUSES = ("待判断", "建议回应", "已回应", "无需回应", "升级 PR/法务")
 
 
 def _review_to_status(status: str):
@@ -2097,6 +2534,19 @@ CREATE TABLE IF NOT EXISTS mentions (
     tos_method TEXT NOT NULL,
     fetch_status TEXT NOT NULL DEFAULT 'ok',
     fetch_error TEXT,
+    platform TEXT NOT NULL DEFAULT 'web',
+    content_type TEXT NOT NULL DEFAULT 'article',
+    provider TEXT NOT NULL DEFAULT '',
+    provider_item_id TEXT NOT NULL DEFAULT '',
+    parent_url TEXT NOT NULL DEFAULT '',
+    discovery_method TEXT NOT NULL DEFAULT 'public_feed',
+    coverage_tier TEXT NOT NULL DEFAULT 'public_index',
+    provider_added_at TEXT,
+    discovery_latency_seconds INTEGER,
+    view_count INTEGER,
+    like_count INTEGER,
+    comment_count INTEGER,
+    share_count INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -2125,6 +2575,11 @@ CREATE TABLE IF NOT EXISTS analysis_results (
     needs_human_review INTEGER NOT NULL DEFAULT 0,
     analysis_created_at TEXT NOT NULL,
     review_status TEXT NOT NULL DEFAULT 'unreviewed'
+    ,campaign TEXT NOT NULL DEFAULT 'brand_major_risk'
+    ,relevance REAL NOT NULL DEFAULT 0
+    ,novelty_type TEXT NOT NULL DEFAULT 'new_mention'
+    ,notification_priority TEXT NOT NULL DEFAULT 'standard'
+    ,recommended_action TEXT NOT NULL DEFAULT 'monitor'
 );
 
 CREATE INDEX IF NOT EXISTS idx_analysis_mention_id ON analysis_results(mention_id);
@@ -2197,6 +2652,44 @@ CREATE TABLE IF NOT EXISTS delivery_outbox (
 
 CREATE INDEX IF NOT EXISTS idx_delivery_outbox_due
 ON delivery_outbox(status, next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS mention_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mention_id INTEGER NOT NULL REFERENCES mentions(id) ON DELETE CASCADE,
+    view_count INTEGER,
+    like_count INTEGER,
+    comment_count INTEGER,
+    share_count INTEGER,
+    captured_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mention_metrics_mention_time
+ON mention_metrics(mention_id, captured_at);
+
+CREATE TABLE IF NOT EXISTS mention_actions (
+    mention_id INTEGER PRIMARY KEY REFERENCES mentions(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT '待判断',
+    response_url TEXT NOT NULL DEFAULT '',
+    internal_note TEXT NOT NULL DEFAULT '',
+    operator TEXT NOT NULL DEFAULT '',
+    intervention_reason TEXT NOT NULL DEFAULT '',
+    draft_original TEXT NOT NULL DEFAULT '',
+    draft_zh TEXT NOT NULL DEFAULT '',
+    legal_risk_note TEXT NOT NULL DEFAULT '',
+    acted_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mention_notifications (
+    mention_id INTEGER PRIMARY KEY REFERENCES mentions(id) ON DELETE CASCADE,
+    notification_priority TEXT NOT NULL,
+    delivery_status TEXT NOT NULL DEFAULT 'pending',
+    outbox_dedupe_key TEXT,
+    delivered_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS daily_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

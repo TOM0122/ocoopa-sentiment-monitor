@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import List
 from urllib.parse import quote_plus
 
@@ -90,4 +91,27 @@ DEFAULT_SOURCES: List[SourceConfig] = [
         url="google-news://regular",
         alert_threshold_minutes=360,
     ),
+    SourceConfig(
+        source_name="brandwatch_mentions",
+        source_type="social",
+        priority="P1",
+        lane="licensed",
+        method="brandwatch",
+        url="brandwatch://mentions",
+        active=False,
+        alert_threshold_minutes=30,
+    ),
 ]
+
+
+def sources_for_settings(settings) -> List[SourceConfig]:
+    """Enable the licensed connector only when every read-only credential exists."""
+    configured = bool(
+        getattr(settings, "brandwatch_api_token", "")
+        and getattr(settings, "brandwatch_project_id", "")
+        and getattr(settings, "brandwatch_query_id", "")
+    )
+    return [
+        replace(source, active=configured) if source.method == "brandwatch" else source
+        for source in DEFAULT_SOURCES
+    ]

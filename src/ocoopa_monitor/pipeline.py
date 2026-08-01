@@ -8,6 +8,7 @@ from .config import Settings
 from .db import Database, max_risk
 from .delivery import DeliveryClient
 from .fetchers import (
+    BrandwatchMentionsFetcher,
     BraveSearchFetcher,
     CPSCRecallFetcher,
     Fetcher,
@@ -20,6 +21,15 @@ from .llm import RuleOnlyProvider, provider_from_settings
 from .models import Mention, RawItem, SourceConfig, utcnow
 from .outbox import DeliveryOutboxWorker
 from .recall import RecallRegistryService, is_current_recall
+from .social import (
+    assess_public_mention,
+    crossed_surge_threshold,
+    discovery_latency_seconds,
+    enrich_analysis,
+    infer_content_type,
+    infer_platform,
+    response_guidance,
+)
 from .normalize import (
     canonicalize_url,
     content_hash,
@@ -51,6 +61,13 @@ class MonitorPipeline:
             "serpapi": SerpAPIFetcher(settings.serpapi_api_key, settings.request_timeout_seconds),
             "brave_search": BraveSearchFetcher(settings.brave_search_api_key, settings.request_timeout_seconds),
             "gnews": GNewsFetcher(settings.gnews_api_key, settings.request_timeout_seconds),
+            "brandwatch": BrandwatchMentionsFetcher(
+                token=settings.brandwatch_api_token,
+                project_id=settings.brandwatch_project_id,
+                query_id=settings.brandwatch_query_id,
+                base_url=settings.brandwatch_base_url,
+                timeout_seconds=settings.request_timeout_seconds,
+            ),
         }
 
     def run_lane(
@@ -68,6 +85,11 @@ class MonitorPipeline:
         # A fresh / un-bootstrapped DB ingests and analyzes silently so the first
         # deploy never produces an alert storm from pre-existing content.
         realtime_enabled = (not backfill) and self.db.is_bootstrapped()
+        if lane == "regular" and not self.db.get_state("public_social_backfill_completed_at"):
+            realtime_enabled = False
+        if lane == "licensed" and not self.db.get_state("brandwatch_backfill_completed_at"):
+            realtime_enabled = False
+        notice_groups: Dict[str, List[Dict[str, object]]] = {}
         stats = {
             "sources_attempted": 0,
             "sources_failed": 0,
@@ -76,6 +98,7 @@ class MonitorPipeline:
             "items_fetched": 0,
             "items_filtered_since": 0,
             "items_filtered_no_keywords": 0,
+            "items_filtered_irrelevant": 0,
             "items_matched": 0,
             "items_duplicate_skipped": 0,
             "mentions_processed": 0,
@@ -85,6 +108,8 @@ class MonitorPipeline:
             "alerts_suppressed_cooldown": 0,
             "recall_mentions_registered": 0,
             "recall_updates_queued": 0,
+            "mention_batches_queued": 0,
+            "surge_alerts_queued": 0,
             "deliveries_sent": 0,
             "deliveries_failed": 0,
         }
@@ -95,7 +120,14 @@ class MonitorPipeline:
             self.db.record_source_attempt(source)
             try:
                 fetcher = self._fetcher_for(source)
-                raw_items = fetcher.fetch(source, keyword_terms, since=since)
+                source_since = since
+                if source.method == "brandwatch" and source_since is None:
+                    cursor = self.db.get_state(f"source_cursor:{source.source_name}")
+                    if cursor:
+                        source_since = _aware(datetime.fromisoformat(cursor.replace("Z", "+00:00")))
+                        if source_since:
+                            source_since -= timedelta(minutes=5)
+                raw_items = fetcher.fetch(source, keyword_terms, since=source_since)
                 stats["items_fetched"] += len(raw_items)
                 for raw_item in raw_items:
                     query_terms = list(keyword_terms)
@@ -108,13 +140,56 @@ class MonitorPipeline:
                     if not mention.matched_keywords:
                         stats["items_filtered_no_keywords"] += 1
                         continue
+                    assessment = assess_public_mention(mention)
+                    if (
+                        source.source_type == "social"
+                        or (source.source_type == "search" and mention.platform not in {"web", "news"})
+                    ) and not assessment.valid:
+                        stats["items_filtered_irrelevant"] += 1
+                        continue
                     stats["items_matched"] += 1
                     stored = self.db.upsert_mention(mention)
+                    previous_metrics = self.db.record_interaction_snapshot(stored)
+                    surge_reason = (
+                        crossed_surge_threshold(
+                            previous_metrics,
+                            {
+                                "view_count": stored.view_count,
+                                "like_count": stored.like_count,
+                                "comment_count": stored.comment_count,
+                                "share_count": stored.share_count,
+                            },
+                        )
+                        if previous_metrics
+                        else None
+                    )
+                    if surge_reason and realtime_enabled and stored.id is not None:
+                        surge_payload = self.delivery_client.alert_payload(
+                            title=stored.title,
+                            url=stored.source_url,
+                            risk_level="red",
+                            reason=f"传播突增：{surge_reason}",
+                            confidence=1.0,
+                            evidence_check_passed=True,
+                            needs_human_review=False,
+                            sent_at=utcnow(),
+                            delivery_latency_seconds=stored.discovery_latency_seconds,
+                            notification_priority="urgent",
+                        )
+                        if self.db.enqueue_delivery(
+                            kind="surge_alert",
+                            dedupe_key=f"surge:{stored.id}:{surge_reason}",
+                            entity_type="mention",
+                            entity_id=stored.id,
+                            payload=surge_payload,
+                        ):
+                            stats["surge_alerts_queued"] += 1
                     if not stored.is_new and not stored.is_updated:
                         stats["items_duplicate_skipped"] += 1
                         continue
-                    analysis = self.analysis_service.analyze(stored)
+                    analysis = enrich_analysis(stored, self.analysis_service.analyze(stored))
                     self.db.insert_analysis(analysis)
+                    self.db.ensure_mention_action(stored.id, response_guidance(stored, analysis))
                     incident_group_id = self.db.upsert_incident_group(stored, analysis)
                     stats["mentions_processed"] += 1
                     if is_current_recall(stored.title, stored.raw_text):
@@ -122,7 +197,42 @@ class MonitorPipeline:
                         stats["recall_mentions_registered"] += 1
                     if self._is_red_escalation(analysis) and not realtime_enabled:
                         stats["alerts_suppressed_pre_bootstrap"] += 1
-                    if self._should_alert(stored, analysis, backfill, realtime_enabled):
+                    # Every effective public mention enters the first-discovery
+                    # ledger immediately, including routine recall reposts. The
+                    # recall digest reads the same ledger and therefore skips
+                    # these rows instead of sending a second notification.
+                    batch_candidate = assessment.valid and realtime_enabled and stored.is_new
+                    incident_suppressed = self.db.is_incident_suppressed(stored.event_fingerprint)
+                    if batch_candidate and incident_suppressed:
+                        stats["alerts_suppressed_muted"] += 1
+                    elif batch_candidate:
+                        notification_group = (
+                            "recall_26_659"
+                            if is_current_recall(stored.title, stored.raw_text)
+                            else topic_key(stored.title, stored.raw_text, stored.matched_keywords)
+                        )
+                        notice_groups.setdefault(notification_group, []).append(
+                            {
+                                "mention_id": stored.id,
+                                "title": stored.title,
+                                "source_url": stored.source_url,
+                                "platform": stored.platform,
+                                "content_type": stored.content_type,
+                                "summary_zh": analysis.summary_zh,
+                                "campaign": analysis.campaign,
+                                "recommended_action": analysis.recommended_action,
+                                "notification_priority": analysis.notification_priority,
+                                "needs_human_review": analysis.needs_human_review,
+                                "view_count": stored.view_count,
+                                "like_count": stored.like_count,
+                                "comment_count": stored.comment_count,
+                                "share_count": stored.share_count,
+                                "_mention": stored,
+                                "_analysis": analysis,
+                                "_incident_group_id": incident_group_id,
+                            }
+                        )
+                    elif self._should_alert(stored, analysis, backfill, realtime_enabled):
                         if self.db.is_incident_suppressed(stored.event_fingerprint):
                             # Human marked this incident false-positive or muted.
                             stats["alerts_suppressed_muted"] += 1
@@ -133,11 +243,59 @@ class MonitorPipeline:
                         elif self._create_alert(stored, analysis, incident_group_id):
                             stats["alerts_created"] += 1
                 self.db.record_source_success(source)
+                if source.method == "brandwatch":
+                    self.db.set_state(f"source_cursor:{source.source_name}", utcnow().isoformat())
             except Exception as exc:
                 stats["sources_failed"] += 1
                 if source.priority == "P0":
                     stats["p0_sources_failed"] += 1
                 self.db.record_source_failure(source, str(exc))
+        for rows in notice_groups.values():
+            priority = "urgent" if any(row["notification_priority"] == "urgent" for row in rows) else "standard"
+            urgent_alert_row = next(
+                (
+                    row for row in rows
+                    if row["notification_priority"] == "urgent"
+                    and self._is_red_escalation(row["_analysis"])
+                ),
+                None,
+            )
+            urgent_alert_allowed = False
+            if urgent_alert_row:
+                urgent_alert_allowed = self._topic_allows_alert(
+                    urgent_alert_row["_mention"], urgent_alert_row["_analysis"]
+                )
+                if not urgent_alert_allowed:
+                    stats["alerts_suppressed_cooldown"] += 1
+            payload = self.delivery_client.mention_batch_payload(rows, priority)
+            mention_ids = [int(row["mention_id"]) for row in rows if row.get("mention_id") is not None]
+            if self.db.enqueue_mention_batch(mention_ids, priority, payload):
+                stats["mention_batches_queued"] += 1
+                if urgent_alert_row and urgent_alert_allowed:
+                    mention = urgent_alert_row["_mention"]
+                    analysis = urgent_alert_row["_analysis"]
+                    dedupe_key = f"{mention.event_fingerprint}:red"
+                    if not self.db.alert_exists(dedupe_key):
+                        self.db.insert_alert(
+                            mention_id=mention.id,
+                            incident_group_id=int(urgent_alert_row["_incident_group_id"]),
+                            risk_level=analysis.risk_level,
+                            alert_reason=analysis.escalation_reason,
+                            dedupe_key=dedupe_key,
+                            confidence=analysis.confidence,
+                            evidence_check_passed=analysis.evidence_check_passed,
+                            needs_human_review=analysis.needs_human_review,
+                            delivery_latency_seconds=self._delivery_latency_seconds(mention, utcnow()),
+                            sent_to=None,
+                            sent_at=None,
+                        )
+                        self.db.record_topic_alert(
+                            topic_key(mention.title, mention.raw_text, mention.matched_keywords),
+                            mention.source_type,
+                            analysis.risk_level,
+                            utcnow(),
+                        )
+                        stats["alerts_created"] += 1
         if realtime_enabled:
             stats["recall_updates_queued"] = RecallRegistryService(self.db, self).queue_pending(20)
         delivery_stats = DeliveryOutboxWorker(self.db, self.delivery_client).drain()
@@ -153,8 +311,9 @@ class MonitorPipeline:
         alert only on genuinely new post-backfill content.
         """
         stats: Dict[str, Dict[str, int]] = {}
-        for lane in ("high", "regular"):
-            stats[lane] = self.run_lane(lane, backfill=True, since_days=since_days)
+        for lane in ("high", "regular", "licensed"):
+            lane_days = min(since_days, 30) if lane == "licensed" else since_days
+            stats[lane] = self.run_lane(lane, backfill=True, since_days=lane_days)
         high = stats["high"]
         if high["p0_sources_attempted"] == 0 or high["p0_sources_failed"] > 0:
             raise RuntimeError(
@@ -162,6 +321,10 @@ class MonitorPipeline:
                 f"attempted={high['p0_sources_attempted']} failed={high['p0_sources_failed']}"
             )
         self.db.mark_bootstrapped()
+        if stats["regular"]["sources_attempted"] and stats["regular"]["sources_failed"] == 0:
+            self.db.set_state("public_social_backfill_completed_at", utcnow().isoformat())
+        if stats["licensed"]["sources_attempted"] and stats["licensed"]["sources_failed"] == 0:
+            self.db.set_state("brandwatch_backfill_completed_at", utcnow().isoformat())
         return stats
 
     def _fetcher_for(self, source: SourceConfig) -> Fetcher:
@@ -181,7 +344,13 @@ class MonitorPipeline:
         now = utcnow()
         title = normalize_text(raw_item.title)
         raw_text = normalize_text(raw_item.raw_text)
+        platform = raw_item.platform or infer_platform(raw_item.source_url, raw_item.source_type)
+        content_type = raw_item.content_type or infer_content_type(raw_item.source_url, platform)
         canonical = canonicalize_url(raw_item.source_url)
+        if raw_item.provider and raw_item.provider_item_id and content_type == "comment" and (
+            not raw_item.parent_url or canonicalize_url(raw_item.parent_url) == canonical
+        ):
+            canonical = f"{raw_item.provider}://{raw_item.provider_item_id}"
         matched = find_keywords(f"{title}\n{raw_text}", keyword_terms)
         if raw_item.source_name.startswith(("brave", "serpapi", "gnews")):
             matched.append("search_api_query_hit")
@@ -208,6 +377,21 @@ class MonitorPipeline:
             duplicate_group_id=fingerprint,
             backfill=backfill,
             tos_method=raw_item.tos_method,
+            platform=platform,
+            content_type=content_type,
+            provider=raw_item.provider,
+            provider_item_id=raw_item.provider_item_id,
+            parent_url=raw_item.parent_url,
+            discovery_method=raw_item.discovery_method,
+            coverage_tier=raw_item.coverage_tier,
+            provider_added_at=_aware(raw_item.provider_added_at),
+            discovery_latency_seconds=discovery_latency_seconds(
+                raw_item.published_at, raw_item.provider_added_at, now
+            ),
+            view_count=raw_item.view_count,
+            like_count=raw_item.like_count,
+            comment_count=raw_item.comment_count,
+            share_count=raw_item.share_count,
         )
 
     @staticmethod
@@ -270,6 +454,7 @@ class MonitorPipeline:
             needs_human_review=analysis.needs_human_review,
             sent_at=queued_at,
             delivery_latency_seconds=delivery_latency_seconds,
+            notification_priority=analysis.notification_priority,
         )
         self.db.insert_alert_with_outbox(
             mention_id=mention.id,

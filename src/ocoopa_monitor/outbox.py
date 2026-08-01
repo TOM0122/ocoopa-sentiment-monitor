@@ -24,6 +24,7 @@ class DeliveryOutboxWorker:
             try:
                 public_payload = dict(job["payload"])
                 public_payload.pop("_recall_record_ids", None)
+                public_payload.pop("_mention_ids", None)
                 sent_to = self.delivery.send_alert(public_payload)
                 if not sent_to:
                     raise RuntimeError("delivery channel is not configured")

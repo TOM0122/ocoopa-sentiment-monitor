@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 
 from ..models import RawItem, SourceConfig
 from ..normalize import normalize_text
+from ..social import infer_content_type, infer_platform
 from .base import Fetcher
 
 HIGH_SENSITIVITY_QUERY = (
@@ -16,10 +17,12 @@ HIGH_SENSITIVITY_QUERY = (
     'OR UT3053 OR UT3056 OR "ZLS-118" OR H01)'
 )
 REGULAR_QUERY = (
-    '(("Ocoopa" OR "Ocopa" OR "Shenzhen Street Cat Technology") '
-    '(fire OR death OR lawsuit OR recall OR burn OR overheat OR "26-659" '
-    'OR UT3053 OR UT3056 OR "ZLS-118" OR H01)) '
-    'OR ("hand warmer" (fire OR death OR recall OR lawsuit))'
+    '(("Ocoopa" OR "Ocopa" OR "Shenzhen Street Cat Technology" OR "hand warmer") '
+    '(fire OR death OR lawsuit OR recall OR burn OR overheat OR refund OR complaint OR "26-659" '
+    'OR UT3053 OR UT3056 OR "ZLS-118" OR H01) '
+    '(site:tiktok.com OR site:instagram.com OR site:facebook.com OR site:youtube.com '
+    'OR site:x.com OR site:twitter.com OR site:reddit.com OR site:trustpilot.com '
+    'OR site:sitejabber.com OR site:forums.redflagdeals.com))'
 )
 
 
@@ -72,6 +75,12 @@ class SerpAPIFetcher(Fetcher):
                     language="en",
                     country_or_market="US",
                     tos_method="api",
+                    platform=infer_platform(link, source.source_type),
+                    content_type=infer_content_type(link, infer_platform(link, source.source_type)),
+                    provider="serpapi",
+                    provider_item_id=link,
+                    discovery_method="public_index",
+                    coverage_tier="public_index",
                 )
             )
         return items
@@ -189,6 +198,12 @@ class BraveSearchFetcher(Fetcher):
                     language="en",
                     country_or_market="US",
                     tos_method="api",
+                    platform=infer_platform(link, source.source_type),
+                    content_type=infer_content_type(link, infer_platform(link, source.source_type)),
+                    provider="brave",
+                    provider_item_id=link,
+                    discovery_method="public_index",
+                    coverage_tier="public_index",
                 )
             )
         return items

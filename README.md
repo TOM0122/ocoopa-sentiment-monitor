@@ -7,7 +7,7 @@ Internal Ocoopa public-opinion and PR risk monitoring agent. **In production (Ra
 The core pipeline runs on the Python standard library; the web console/review UI needs the optional FastAPI extra.
 
 - keyword hot-load + `keyword` CLI for live edits (law-firm names, case numbers, models)
-- high-sensitivity (15 min, free RSS + CPSC + legal lead-gen) and regular (hourly, commercial APIs) lanes
+- high-sensitivity (15 min), public-index social discovery (hourly), and optional licensed social (5 min) lanes
 - RSS, CPSC recall API, and generic-RSS (AboutLawsuits legal) fetchers; source-health monitoring + fetcher isolation
 - conservative URL/content/event dedupe + cross-source topic cooldown (one page per event)
 - rule-first analysis with a pluggable LLM provider (DeepSeek in prod), cross-lingual evidence grounding
@@ -15,7 +15,7 @@ The core pipeline runs on the Python standard library; the web console/review UI
 - durable DingTalk outbox with retry for red alerts and recall overview digests; scheduled daily Chinese summaries, source-health pages, and unacked-alert escalation
 - dedicated CPSC 26-659 recall registry covering affected models, Reddit Atom, news/RSS, CPSC, legal feeds, and general-web search APIs
 - auditable group-history import and UTF-8 CSV statistics-table export
-- human feedback loop (confirm / false-positive / mute) via the `review` CLI and the web review page
+- event review plus per-post response workflow (`待判断` / `建议回应` / `已回应` / `无需回应` / `升级 PR/法务`); no publishing endpoint exists
 - read-only operations console: daily trend line, keyword/topic synthesis, management summary, recommended actions, search, and CSV export
 
 ## Quick Start
@@ -51,12 +51,15 @@ Run the built-in scheduler:
 python3 -m ocoopa_monitor.cli scheduler
 ```
 
-It runs the high-sensitivity lane every 15 minutes by default, the regular lane hourly, and generates a Beijing-time daily report around 09:00.
+It runs the high-sensitivity lane every 15 minutes, the public-index lane hourly,
+the licensed lane every 5 minutes when configured, and generates a Beijing-time
+daily report around 09:00.
 
 Validate deployment configuration before starting production:
 
 ```bash
-python3 -m ocoopa_monitor.cli doctor --production
+python3 -m ocoopa_monitor.cli doctor --production --role scheduler
+python3 -m ocoopa_monitor.cli doctor --production --role web
 ```
 
 The doctor command reports whether required secrets are configured without printing secret values.
@@ -160,7 +163,44 @@ To stay inside free quotas, commercial APIs run on the **regular (hourly) lane**
 Ocoopa (fire OR death OR lawsuit OR recall OR CPSC OR "class action")
 ```
 
-Brave Search is the recommended commercial source; SerpAPI's free tier is too small and is disabled by default. See cost/quota guidance in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+Brave Search is the recommended public-index source. Its regular query is site
+limited to public TikTok, Instagram, Facebook, YouTube, X, Reddit, forum, and
+review pages. A zero result means only that the configured source did not
+discover a record; it does not prove the platform has no discussion.
+
+### Optional Brandwatch pilot
+
+Brandwatch is disabled unless all three read-only pilot values are present:
+
+```bash
+export OCOOPA_BRANDWATCH_TOKEN="..."
+export OCOOPA_BRANDWATCH_PROJECT_ID="..."
+export OCOOPA_BRANDWATCH_QUERY_ID="..."
+```
+
+The connector polls Mentions every five minutes with separate, five-minute-overlap
+`sinceAdded` and `sinceUpdated` streams and de-duplicates by `resourceId`. Enabling
+it triggers a 30-day silent backfill before real-time delivery. Keep the account
+read-only: the application contains no reply, post, like, hide, or delete code.
+Provider coverage and latency remain visible on the analysis page and must be
+validated during the 14-day pilot before procurement.
+
+## Web authentication
+
+Set independent secrets for the access code and signed session:
+
+```bash
+export OCOOPA_REVIEW_TOKEN="one-time-entry-code"
+export OCOOPA_SESSION_SECRET="a-different-long-random-secret"
+```
+
+Open `/auth/login`; successful login creates `HttpOnly`, `Secure`,
+`SameSite=Lax` session cookies. During the migration window,
+`OCOOPA_ALLOW_QUERY_TOKEN=true` accepts an old `?token=` URL once, creates a
+session, and redirects to a clean URL. Rotate the exposed review token and set
+`OCOOPA_ALLOW_QUERY_TOKEN=false` after migration. Automation endpoints continue
+to accept only `Authorization: Bearer …`; query-string credentials are never
+accepted by automation endpoints.
 
 ## Docker Deployment
 
@@ -168,7 +208,7 @@ Create a `.env` file from `.env.example`, then run:
 
 ```bash
 docker compose up -d --build
-docker compose exec ocoopa-monitor python -m ocoopa_monitor.cli doctor --production
+docker compose exec ocoopa-monitor python -m ocoopa_monitor.cli doctor --production --role scheduler
 docker compose exec ocoopa-monitor python -m ocoopa_monitor.cli seed
 docker compose exec ocoopa-monitor python -m ocoopa_monitor.cli backfill --days 180
 ```
@@ -189,7 +229,8 @@ Recommended Railway setup:
 6. Run one-off commands after the first deploy:
 
 ```bash
-python -m ocoopa_monitor.cli doctor --production
+python -m ocoopa_monitor.cli doctor --production --role scheduler
+python -m ocoopa_monitor.cli doctor --production --role web
 python -m ocoopa_monitor.cli init-db
 python -m ocoopa_monitor.cli seed
 python -m ocoopa_monitor.cli backfill --days 180
@@ -220,8 +261,11 @@ High-sensitivity lane (15 min, free / unmetered):
 - Reddit public Atom search for recall/fire/model propagation
 
 Regular lane (hourly):
-- Brave Search / GNews (when API keys are set; throttled into free quotas)
+- Brave site-limited public-social discovery / GNews (when API keys are set)
 - Google News RSS redundancy
+
+Licensed lane (5 minutes, disabled by default):
+- Brandwatch Mentions API with read-only credentials
 
 “All external discourse” is implemented as best-effort coverage of compliant,
 publicly accessible or licensed sources. Closed/private groups and social
