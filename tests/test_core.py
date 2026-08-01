@@ -899,6 +899,19 @@ class CoreTests(unittest.TestCase):
                     "source_count": 2,
                     "last_seen_at": "2026-07-30T09:00:00Z",
                     "source_url": "https://example.com/record",
+                    "mentions": [
+                        {
+                            "id": 77,
+                            "title": "Priority event evidence",
+                            "raw_text": "Detailed OCOOPA safety complaint for review",
+                            "summary_zh": "需要复核的原文证据",
+                            "source_url": "https://example.com/evidence",
+                            "event_fingerprint": "priority-evidence",
+                            "platform": "reddit",
+                            "content_type": "post",
+                            "risk_level": "red",
+                        }
+                    ],
                 },
                 {
                     "incident_id": 3,
@@ -921,6 +934,9 @@ class CoreTests(unittest.TestCase):
         self.assertLess(html.index("Expired mute"), html.index("Handled event"))
         self.assertIn("静音已到期", html)
         self.assertIn('rel="noopener noreferrer"', html)
+        self.assertIn('id="mention-77"', html)
+        self.assertIn('location.hash.startsWith("#mention-")', html)
+        self.assertIn('.mention-card:target', html)
         self.assertIn("原始来源链接不可用", html)
         self.assertNotIn("javascript:alert", html)
 

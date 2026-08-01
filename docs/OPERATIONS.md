@@ -122,6 +122,7 @@ python -m ocoopa_monitor.cli recall sync --limit 10             # 队列补发/�
 同一个 web 服务还提供给法务/PR/高层看的只读控制台(同样用 `OCOOPA_REVIEW_TOKEN` 鉴权):
 
 - **分析看板** `GET /review/analysis?days=30`:发布量与发现工作量双走线、传播链接/独立传播簇/新增实质信号三层口径、平台趋势、跨平台扩散、关键词/议题、互动榜、处置状态和覆盖/延迟矩阵；旧地址 `/dashboard` 保持兼容。“未识别新增实质信号”只是自动规则结果，不替代人工核实。
+- **传播数据明细** `GET /review/analysis/details?metric=clusters&days=30`:由看板顶部四张指标卡进入统一明细页；支持 `links`、`clusters`、`syndicated`、`substantive` 四类标签，继承平台/主题/时间筛选，列表每页 100 项。传播簇可展开查看全部成员，并跳转公开原文或对应复核记录。
 - **检索** `GET /console/search?q=<关键词>&risk=<red|yellow|green>&days=30`。
 - **导出 CSV** `GET /console/export.csv?days=30`:包含平台、供应商身份、发现延迟、互动快照、主题与回应状态。
 

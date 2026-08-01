@@ -8,11 +8,12 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 
 from datetime import datetime, time, timedelta, timezone
 from typing import Optional
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 from zoneinfo import ZoneInfo
 
 from .config import load_settings
 from .console_web import compute_dashboard, filter_rows, render_dashboard, render_search, rows_to_csv
+from .analysis_details import build_detail_view, normalize_detail_metric, render_analysis_details
 from .db import create_database
 from .keywords import DEFAULT_KEYWORDS
 from .models import utcnow
@@ -291,6 +292,51 @@ if FastAPI is not None:
         start, end = _window(days)
         rows = filter_rows(db.fetch_mentions_between(start, end), q, risk)
         return HTMLResponse(render_search(rows, q, risk, days, ""))
+
+    @app.get("/review/analysis/details", response_class=HTMLResponse)
+    def analysis_details(
+        request: Request,
+        token: str = "",
+        metric: str = "links",
+        days: int = 30,
+        platform: str = "",
+        campaign: str = "",
+        page: int = 1,
+        authorization: str = Header(default=""),
+    ) -> HTMLResponse:
+        metric = normalize_detail_metric(metric)
+        days = min(max(days, 1), 366)
+        page = max(page, 1)
+        if token and settings.allow_query_token and token_ok(settings.review_token, token):
+            target = "/review/analysis/details?" + urlencode(
+                {
+                    key: value for key, value in {
+                        "metric": metric,
+                        "days": days,
+                        "platform": platform,
+                        "campaign": campaign,
+                        "page": page,
+                    }.items() if value not in (None, "")
+                }
+            )
+            return _session_redirect(target)
+        if not _page_authorized(request):
+            return _unauthorized(HTMLResponse)
+        start, end = _window(days)
+        rows = [
+            dict(row) for row in db.fetch_mentions_between(start, end)
+            if (not platform or row.get("platform") == platform)
+            and (not campaign or row.get("campaign") == campaign)
+        ]
+        view = build_detail_view(rows, metric=metric, page=page)
+        return HTMLResponse(
+            render_analysis_details(
+                view,
+                days,
+                filters={"platform": platform, "campaign": campaign},
+                csrf_token=request.cookies.get(CSRF_COOKIE_NAME, ""),
+            )
+        )
 
     @app.get("/console/export.csv")
     def console_export(
