@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from ocoopa_monitor.analysis_web import compute_dashboard, render_dashboard
+from ocoopa_monitor.analysis_details import build_detail_view, normalize_detail_metric, render_analysis_details
 from ocoopa_monitor.config import Settings
 from ocoopa_monitor.console_web import rows_to_csv
 from ocoopa_monitor.db import Database
@@ -110,6 +111,61 @@ class SocialUpgradeTests(unittest.TestCase):
         self.assertIn("story_cluster_key", exported.splitlines()[0])
         self.assertIn("story_cluster_label", exported.splitlines()[0])
         self.assertIn("news_repost", exported)
+
+        detail = build_detail_view(rows, metric="clusters", page=1, page_size=20)
+        self.assertEqual(detail["counts"], {"links": 5, "clusters": 2, "syndicated": 2, "substantive": 1})
+        self.assertEqual(detail["item_kind"], "cluster")
+        self.assertEqual(sum(cluster["link_count"] for cluster in detail["items"]), 5)
+        self.assertEqual(normalize_detail_metric("invalid"), "links")
+        detail_html = render_analysis_details(
+            detail,
+            7,
+            filters={"platform": "x", "campaign": "recall_26_659"},
+            csrf_token="csrf-value",
+        )
+        self.assertIn('<details class="cluster-card">', detail_html)
+        self.assertIn("查看原文证据", detail_html)
+        self.assertIn("进入复核页", detail_html)
+        self.assertIn("平台：x", detail_html)
+        self.assertIn('name="csrf" value="csrf-value"', detail_html)
+        self.assertNotIn("story:recall-26-659", detail_html)
+
+        paged = build_detail_view(rows, metric="links", page=2, page_size=20)
+        # Page size is bounded to at least 20, so this small fixture remains on one page.
+        self.assertEqual(paged["page"], 1)
+
+        stats["filters"] = {"platform": "x", "campaign": "recall_26_659"}
+        filtered_dashboard = render_dashboard(stats, 7)
+        self.assertIn("/review/analysis/details?metric=links&amp;days=7&amp;platform=x&amp;campaign=recall_26_659", filtered_dashboard.replace("&", "&amp;"))
+
+    def test_analysis_details_paginate_and_reject_unsafe_evidence_urls(self):
+        when = datetime(2026, 8, 1, 2, tzinfo=timezone.utc)
+        rows = [
+            {
+                "id": index,
+                "title": f"Independent OCOOPA safety discussion {index}",
+                "raw_text": f"Independent OCOOPA product safety discussion with enough detail {index}",
+                "source_url": "javascript:alert(1)" if index == 25 else f"https://example.com/{index}",
+                "event_fingerprint": f"event-{index}",
+                "source_type": "social",
+                "source_name": "test",
+                "platform": "reddit",
+                "content_type": "post",
+                "fetched_at": when,
+                "published_at": when,
+                "risk_level": "yellow",
+                "campaign": "brand_major_risk",
+            }
+            for index in range(1, 26)
+        ]
+        view = build_detail_view(rows, metric="links", page=2, page_size=20)
+        self.assertEqual(view["total_items"], 25)
+        self.assertEqual(view["page"], 2)
+        self.assertEqual(len(view["items"]), 5)
+        html = render_analysis_details(view, 30, filters={"platform": "reddit"})
+        self.assertIn("第 2 / 2 页", html)
+        self.assertIn("← 上一页", html)
+        self.assertNotIn("javascript:alert", html)
 
     def test_signed_session_expiry_tamper_and_csrf(self):
         token = issue_session("independent", ttl_hours=1, now=100)
