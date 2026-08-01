@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from ocoopa_monitor.analysis_web import compute_dashboard, render_dashboard
 from ocoopa_monitor.config import Settings
+from ocoopa_monitor.console_web import rows_to_csv
 from ocoopa_monitor.db import Database
 from ocoopa_monitor.delivery import DeliveryClient, GenericWebhookChannel
 from ocoopa_monitor.fetchers.brandwatch import BrandwatchMentionsFetcher
@@ -16,6 +17,7 @@ from ocoopa_monitor.pipeline import MonitorPipeline
 from ocoopa_monitor.session_auth import issue_session, verify_csrf, verify_session
 from ocoopa_monitor.social import assess_public_mention, crossed_surge_threshold, infer_platform, response_guidance
 from ocoopa_monitor.sources import sources_for_settings
+from ocoopa_monitor.syndication import assess_syndication
 
 
 def _settings(path: str, **overrides) -> Settings:
@@ -47,6 +49,68 @@ class FakeResponse:
 
 
 class SocialUpgradeTests(unittest.TestCase):
+    def test_recall_reposts_are_standard_but_new_first_person_claim_is_substantive(self):
+        release_text = (
+            "OCOOPA recall 26-659 covers 1.5 million rechargeable hand warmers due to fire and burn hazards. "
+            "The CPSC release reports one death and directs consumers to stop using affected models."
+        )
+        news = self._mention("https://news.example.com/ocoopa-recall", release_text)
+        news.source_type = "news"
+        news.platform = "news"
+        news.content_type = "article"
+        assessment = assess_public_mention(news)
+        spread = assess_syndication(news, assessment.novelty_type)
+        self.assertEqual(assessment.notification_priority, "standard")
+        self.assertEqual(assessment.novelty_type, "known_recall_repost")
+        self.assertEqual(spread.role, "news_repost")
+        self.assertEqual(spread.cluster_key, "story:recall-26-659:official-release")
+        self.assertEqual(spread.cluster_label, "召回 26-659 官方新闻稿传播簇")
+
+        official = self._mention(
+            "https://www.cpsc.gov/Recalls/2026/OCOOPA-Direct-Recalls-Hand-Warmers",
+            release_text,
+        )
+        official.source_type = "news"
+        official.platform = "news"
+        official.content_type = "article"
+        official_spread = assess_syndication(official, "known_recall_repost")
+        self.assertEqual(official_spread.role, "official_source")
+        self.assertEqual(official_spread.cluster_key, spread.cluster_key)
+
+        claim = self._mention(
+            "https://www.tiktok.com/@person/video/26",
+            "My OCOOPA UT3053 from recall 26-659 caught fire yesterday and burned my hand.",
+        )
+        claim_assessment = assess_public_mention(claim)
+        claim_spread = assess_syndication(claim, claim_assessment.novelty_type)
+        self.assertEqual(claim_assessment.notification_priority, "urgent")
+        self.assertEqual(claim_spread.role, "substantive_update")
+        self.assertNotEqual(claim_spread.cluster_key, spread.cluster_key)
+
+    def test_dashboard_and_export_separate_links_clusters_and_substantive_signals(self):
+        when = datetime(2026, 8, 1, 2, tzinfo=timezone.utc)
+        release = "OCOOPA recall 26-659 for UT3053 hand warmers due to fire and burn hazards; one death was reported."
+        rows = [
+            {"title": release, "raw_text": release, "source_url": "https://www.cpsc.gov/Recalls/2026/OCOOPA", "event_fingerprint": "official", "source_type": "news", "source_name": "cpsc", "platform": "news", "content_type": "article", "fetched_at": when, "published_at": when, "risk_level": "red", "sentiment": "negative", "category": "recall", "campaign": "recall_26_659", "novelty_type": "known_recall_repost"},
+            {"title": release, "raw_text": release, "source_url": "https://news.example.com/repost", "event_fingerprint": "news-copy", "source_type": "news", "source_name": "news", "platform": "news", "content_type": "article", "fetched_at": when, "published_at": when, "risk_level": "yellow", "sentiment": "neutral", "category": "recall", "campaign": "recall_26_659", "novelty_type": "known_recall_repost"},
+            {"title": release, "raw_text": release, "source_url": "https://x.com/outlet/status/1", "event_fingerprint": "social-copy", "source_type": "search", "source_name": "brave", "platform": "x", "content_type": "post", "fetched_at": when, "published_at": when, "risk_level": "yellow", "sentiment": "neutral", "category": "recall", "campaign": "recall_26_659", "novelty_type": "known_recall_repost"},
+            {"title": "My OCOOPA UT3053 caught fire", "raw_text": "My OCOOPA UT3053 from recall 26-659 caught fire and burned my hand.", "source_url": "https://reddit.com/r/test/1", "event_fingerprint": "new-claim", "source_type": "social", "source_name": "reddit", "platform": "reddit", "content_type": "post", "fetched_at": when, "published_at": when, "risk_level": "red", "sentiment": "negative", "category": "user_complaint", "campaign": "recall_26_659", "novelty_type": "new_high_risk_claim", "notification_priority": "urgent"},
+            {"title": "My OCOOPA UT3053 caught fire", "raw_text": "My OCOOPA UT3053 from recall 26-659 caught fire and burned my hand.", "source_url": "https://news.example.com/user-claim-copy", "event_fingerprint": "new-claim", "source_type": "news", "source_name": "news", "platform": "news", "content_type": "article", "fetched_at": when, "published_at": when, "risk_level": "red", "sentiment": "negative", "category": "user_complaint", "campaign": "recall_26_659", "novelty_type": "new_high_risk_claim", "notification_priority": "urgent"},
+        ]
+        stats = compute_dashboard(rows, [], 7, now=datetime(2026, 8, 1, 8, tzinfo=timezone.utc))
+        self.assertEqual(stats["valid_mentions"], 5)
+        self.assertEqual(stats["story_clusters"], 2)
+        self.assertEqual(stats["syndicated_mentions"], 2)
+        self.assertEqual(stats["substantive_updates"], 1)
+        self.assertEqual(sum(day["cluster_total"] for day in stats["daily"]), 2)
+        html = render_dashboard(stats, 7)
+        self.assertIn("独立传播簇", html)
+        self.assertIn("新增实质信号", html)
+        exported = rows_to_csv(rows)
+        self.assertIn("story_cluster_key", exported.splitlines()[0])
+        self.assertIn("story_cluster_label", exported.splitlines()[0])
+        self.assertIn("news_repost", exported)
+
     def test_signed_session_expiry_tamper_and_csrf(self):
         token = issue_session("independent", ttl_hours=1, now=100)
         self.assertTrue(verify_session(token, "independent", now=200))
@@ -104,7 +168,20 @@ class SocialUpgradeTests(unittest.TestCase):
         db.upsert_mention(second)
         self.assertNotEqual(first.canonical_url, second.canonical_url)
         self.assertNotEqual(first.id, second.id)
+        self.assertNotEqual(first.duplicate_group_id, second.duplicate_group_id)
         self.assertEqual(infer_platform(parent, "social"), "facebook")
+
+        recall_text = "OCOOPA recall 26-659 covers UT3053 hand warmers due to fire and burn hazards."
+        news = pipeline._build_mention(
+            RawItem("news", "news_one", "https://news.example.com/a", recall_text, recall_text),
+            ["OCOOPA", "26-659"], False,
+        )
+        social = pipeline._build_mention(
+            RawItem("search", "brave_social", "https://x.com/outlet/status/1", recall_text, recall_text),
+            ["OCOOPA", "26-659"], False,
+        )
+        self.assertEqual(news.duplicate_group_id, "story:recall-26-659:official-release")
+        self.assertEqual(news.duplicate_group_id, social.duplicate_group_id)
 
     def test_brandwatch_paginates_and_maps_resource_identity(self):
         pages = [
@@ -182,6 +259,19 @@ class SocialUpgradeTests(unittest.TestCase):
         self.assertFalse(payload["needs_human_review"])
         self.assertTrue(payload["contains_human_review"])
         self.assertIn("需人工核实", payload["text"])
+
+    def test_recall_batch_copy_reports_spread_without_inventing_new_facts(self):
+        payload = DeliveryClient(GenericWebhookChannel()).mention_batch_payload(
+            [
+                {"campaign": "recall_26_659", "story_cluster_key": "story:recall-26-659:official-release", "story_role": "news_repost", "story_role_label": "新闻转载", "is_syndicated": True, "has_substantive_update": False, "platform": "news", "title": "Recall copy", "summary_zh": "媒体转载召回信息", "source_url": "https://news.example.com/1", "notification_priority": "standard"},
+                {"campaign": "recall_26_659", "story_cluster_key": "story:recall-26-659:official-release", "story_role": "social_amplification", "story_role_label": "社媒扩散", "is_syndicated": True, "has_substantive_update": False, "platform": "x", "title": "Social copy", "summary_zh": "媒体社媒账号同步", "source_url": "https://x.com/outlet/1", "notification_priority": "standard"},
+            ],
+            "standard",
+        )
+        self.assertIn("召回传播总览", payload["title"])
+        self.assertIn("独立传播簇：1 个", payload["text"])
+        self.assertIn("自动规则未识别到", payload["text"])
+        self.assertTrue(payload["suppress_at"])
 
     def test_surge_thresholds_and_brandwatch_feature_flag(self):
         self.assertEqual(crossed_surge_threshold({"view_count": 9000}, {"view_count": 10000}), "views_10000")

@@ -8,6 +8,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
+from .syndication import ROLE_LABELS, with_syndication_fields
+
 
 _CATEGORY_LABELS = {
     "lawsuit": "诉讼与索赔",
@@ -129,10 +131,15 @@ def _build_analysis(stats: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     if total:
         summaries = [
             (
-                f"近 {stats['window_days']} 天共收录 {total} 条提及，涉及 "
-                f"{stats['unique_events']} 个事件指纹；{trend['label']}。"
+                f"近 {stats['window_days']} 天共收录 {total} 个传播链接，归并为 "
+                f"{stats['story_clusters']} 个独立传播簇；{trend['label']}。"
             )
         ]
+        summaries.append(
+            f"其中新闻/社媒转载扩散 {stats['syndicated_mentions']} 条，"
+            f"自动规则识别的新增实质信号 {stats['substantive_updates']} 条。"
+            "实质信号仍需人工核实。"
+        )
         negative = sentiment.get("negative", 0)
         summaries.append(
             f"红色 {risk.get('red', 0)} 条、黄色 {risk.get('yellow', 0)} 条；"
@@ -160,7 +167,11 @@ def _build_analysis(stats: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     if review_needed:
         recommendations.append(f"先处理 {review_needed} 条需人工核实内容，核验前不得作为确证事实外传。")
     if trend["direction"] == "up":
-        recommendations.append("提及量进入上升周期，建议提高重点平台巡检频率并观察是否出现跨来源扩散。")
+        recommendations.append("传播链接量进入上升周期；先判断是新闻转载扩散，还是新增独立事实，再决定是否提高响应等级。")
+    if stats["syndication_ratio"] >= 0.6 and total >= 5:
+        recommendations.append("当前以转载扩散为主，向领导汇报时应同时展示传播链接数和独立传播簇数，避免将转载量误读为新事件。")
+    if total and not stats["substantive_updates"]:
+        recommendations.append("当前规则未识别到新增实质信号；继续抽查原文和社媒评论，不将自动结果作为无风险结论。")
     if top_categories and top_categories[0][0] in {"lawsuit", "recall"}:
         recommendations.append(
             f"当前首要议题为“{top_categories[0][1]}”，建议同步 PR、法务与客服准备事实清单和标准答复。"
@@ -180,7 +191,7 @@ def compute_dashboard(
     now: Optional[datetime] = None,
     source_health: Iterable[Any] = (),
 ) -> Dict[str, Any]:
-    data = _rows(rows)
+    data = [with_syndication_fields(row) for row in _rows(rows)]
     alert_rows = _rows(alerts)
     health_rows = _rows(source_health)
     days = min(max(int(window_days), 1), 366)
@@ -191,7 +202,11 @@ def compute_dashboard(
     local_today = current.astimezone(tz).date()
     dates = [local_today - timedelta(days=offset) for offset in range(days - 1, -1, -1)]
     daily_by_date: Dict[date, Dict[str, Any]] = {
-        day: {"date": day.isoformat(), "total": 0, "published_total": 0, "red": 0, "yellow": 0, "negative": 0}
+        day: {
+            "date": day.isoformat(), "total": 0, "published_total": 0,
+            "cluster_total": 0, "substantive_total": 0,
+            "red": 0, "yellow": 0, "negative": 0,
+        }
         for day in dates
     }
     risk = Counter(str(row.get("risk_level") or "unknown") for row in data)
@@ -202,11 +217,14 @@ def compute_dashboard(
     content_types = Counter(str(row.get("content_type") or "article") for row in data)
     campaigns = Counter(str(row.get("campaign") or "brand_major_risk") for row in data)
     response_statuses = Counter(str(row.get("response_status") or "待判断") for row in data)
+    story_roles = Counter(str(row.get("story_role") or "independent_mention") for row in data)
     keyword_counter: Counter[str] = Counter()
     keyword_labels: Dict[str, str] = {}
     platform_by_day: Dict[str, Counter[date]] = {}
     event_platforms: Dict[str, set] = {}
     event_titles: Dict[str, str] = {}
+    cluster_first_days: Dict[str, date] = {}
+    substantive_clusters: set[str] = set()
     for row in data:
         timestamp = _as_datetime(row.get("fetched_at"))
         if timestamp:
@@ -221,7 +239,12 @@ def compute_dashboard(
                     bucket["negative"] += 1
                 platform_name = str(row.get("platform") or "web")
                 platform_by_day.setdefault(platform_name, Counter())[day] += 1
-        event_key = str(row.get("event_fingerprint") or "")
+                cluster_key = str(row.get("story_cluster_key") or "")
+                if cluster_key and (cluster_key not in cluster_first_days or day < cluster_first_days[cluster_key]):
+                    cluster_first_days[cluster_key] = day
+                if cluster_key and bool(row.get("has_substantive_update")):
+                    substantive_clusters.add(cluster_key)
+        event_key = str(row.get("story_cluster_key") or row.get("event_fingerprint") or "")
         if event_key:
             event_platforms.setdefault(event_key, set()).add(str(row.get("platform") or "web"))
             event_titles.setdefault(event_key, str(row.get("title") or "未命名事件"))
@@ -234,6 +257,12 @@ def compute_dashboard(
             normalized = keyword.casefold()
             keyword_counter[normalized] += 1
             keyword_labels.setdefault(normalized, keyword)
+
+    for cluster_key, first_day in cluster_first_days.items():
+        if first_day in daily_by_date:
+            daily_by_date[first_day]["cluster_total"] += 1
+            if cluster_key in substantive_clusters:
+                daily_by_date[first_day]["substantive_total"] += 1
 
     daily = list(daily_by_date.values())
     trend_source = daily[:-1] if len(daily) > 1 else daily
@@ -249,7 +278,8 @@ def compute_dashboard(
         if row.get("risk_level") not in {"red", "yellow"}:
             continue
         identity = str(
-            row.get("event_fingerprint")
+            row.get("story_cluster_key")
+            or row.get("event_fingerprint")
             or row.get("canonical_url")
             or row.get("source_url")
             or row.get("title")
@@ -338,6 +368,10 @@ def compute_dashboard(
         "pending_responses": sum(str(row.get("response_status") or "待判断") in {"待判断", "建议回应"} for row in data),
         "surge_mentions": surge_count,
         "alerts": len(alert_rows),
+        "story_clusters": len({str(row.get("story_cluster_key")) for row in data if row.get("story_cluster_key")}),
+        "syndicated_mentions": sum(bool(row.get("is_syndicated")) for row in data),
+        "substantive_updates": len(substantive_clusters),
+        "social_amplifications": story_roles.get("social_amplification", 0),
         "unique_events": len({str(row.get("event_fingerprint")) for row in data if row.get("event_fingerprint")}),
         "new_mentions": sum(bool(row.get("is_new")) for row in data),
         "monitored_mentions": sum(not bool(row.get("backfill")) for row in data),
@@ -353,6 +387,10 @@ def compute_dashboard(
         "content_type": dict(content_types),
         "campaign": dict(campaigns),
         "response_status": dict(response_statuses),
+        "story_role": dict(story_roles),
+        "syndication_ratio": (
+            sum(bool(row.get("is_syndicated")) for row in data) / total if total else 0.0
+        ),
         "coverage": coverage,
         "source_health": health_rows,
         "delivery_p95_seconds": delivery_p95,
@@ -564,16 +602,14 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         stats.get("sentiment", {}), _SENTIMENT_LABELS, max(stats.get("total", 0), 1), 4
     )
     platform_rows = _distribution_rows(stats.get("platform", {}), {}, max(stats.get("total", 0), 1), 8)
-    campaign_rows = _distribution_rows(
-        stats.get("campaign", {}),
-        {"recall_26_659": "召回 26-659", "brand_major_risk": "品牌重大风险"},
-        max(stats.get("total", 0), 1),
-        4,
-    )
     response_rows = _distribution_rows(stats.get("response_status", {}), {}, max(stats.get("total", 0), 1), 6)
+    story_role_rows = _distribution_rows(
+        stats.get("story_role", {}), ROLE_LABELS, max(stats.get("total", 0), 1), 6
+    )
     daily_rows = "".join(
-        f'<tr><td>{escape(item["date"])}</td><td>{item.get("published_total", 0)}</td><td>{item["total"]}</td><td>{item["red"]}</td>'
-        f'<td>{item["yellow"]}</td><td>{item["negative"]}</td></tr>'
+        f'<tr><td>{escape(item["date"])}</td><td>{item.get("published_total", 0)}</td><td>{item["total"]}</td>'
+        f'<td>{item.get("cluster_total", 0)}</td><td>{item.get("substantive_total", 0)}</td>'
+        f'<td>{item["red"]}</td><td>{item["yellow"]}</td><td>{item["negative"]}</td></tr>'
         for item in reversed(stats.get("daily", []))
     )
     filter_form = (
@@ -602,6 +638,7 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         '.metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-bottom:16px}.metric{padding:15px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:0 2px 8px rgba(15,35,60,.03)}'
         '.metric span{display:block;color:var(--muted);font-size:.82rem}.metric strong{display:block;margin:4px 0;font-size:1.75rem;line-height:1.1}.metric small{color:var(--muted)}.metric--risk{border-color:#efb4ae;background:var(--red-soft)}'
         '.trend-note{display:inline-flex;margin-top:4px;padding:3px 8px;border-radius:999px;font-size:.78rem;font-weight:800}.trend-note--up{color:#8a1c14;background:var(--red-soft)}.trend-note--down{color:#15533a;background:#effaf4}.trend-note--flat{color:#4a5a70;background:#eef2f6}'
+        '.scope-note{margin:0 0 16px;padding:12px 14px;border:1px solid #bfd2df;border-left:4px solid var(--accent);border-radius:var(--radius);background:var(--accent-soft);color:#19475f;font-size:.88rem}.scope-note strong{color:var(--ink)}'
         '.grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(300px,.8fr);gap:16px;margin-bottom:16px}.panel{min-width:0;padding:20px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow)}'
         '.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}.panel h2{margin-bottom:4px;font-size:1.08rem}.panel-description{margin:0;color:var(--muted);font-size:.86rem}.legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:.78rem}.legend i{display:inline-block;width:15px;height:3px;margin-right:5px;vertical-align:middle}.legend-published{background:#6d4db3}.legend-total{background:#075985}.legend-red{background:#b42318}.legend-yellow{background:#d69e2e}'
         '.trend-chart{display:block;width:100%;height:auto;min-height:240px}.chart-grid{stroke:var(--line);stroke-width:1}.chart-label{fill:var(--muted);font-size:11px}.chart-line{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.chart-line--total{stroke:#075985}.chart-line--published{stroke:#6d4db3;stroke-dasharray:7 5}.chart-line--red{stroke:#b42318}.chart-line--yellow{stroke:#d69e2e}'
@@ -613,7 +650,7 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         '.footer-note{margin-top:18px;color:var(--muted);font-size:.78rem}.secondary-link:focus-visible,.period-link:focus-visible,.workspace-nav a:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #7dd3fc;outline-offset:2px}'
         '@media(max-width:1100px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:900px){.header-row{align-items:flex-start;flex-direction:column}.header-actions{justify-content:flex-start}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.grid,.distribution-grid{grid-template-columns:1fr}.risk-grid{grid-template-columns:1fr}}'
         '@media(max-width:560px){.page{padding:16px 12px 40px}.workspace-nav{width:100%}.workspace-nav a{flex:1;text-align:center}.metrics{grid-template-columns:1fr 1fr}.metric{padding:13px}.metric strong{font-size:1.45rem}.trend-note{display:block;padding:0;background:transparent;font-size:.73rem;line-height:1.35}.header-actions{gap:6px}.panel{padding:15px}.trend-chart{min-height:190px}.distribution-row{grid-template-columns:minmax(68px,1fr) 1fr 28px 42px}}'
-        '@media(prefers-color-scheme:dark){:root{--canvas:#111a29;--surface:#172235;--ink:#eff6ff;--muted:#b1c0d3;--line:#34455e;--accent:#7dd3fc;--accent-soft:#12324a;--red:#ffb4ac;--red-soft:#482523;--amber:#ffd68a;--amber-soft:#423313;--shadow:0 12px 32px rgba(0,0,0,.2)}.workspace-nav a[aria-current="page"]{background:#7dd3fc;color:#082f49}.period-link--active{color:#bae6fd}.keyword-chip{border-color:#315d75;color:#cbefff}.distribution-bar{background:#2a3950}.chart-line--total{stroke:#7dd3fc}.chart-line--red{stroke:#ffb4ac}.chart-line--yellow{stroke:#ffd68a}.legend-total{background:#7dd3fc}.legend-red{background:#ffb4ac}.legend-yellow{background:#ffd68a}.trend-note--down{color:#a4e2c0;background:#173a2b}}'
+        '@media(prefers-color-scheme:dark){:root{--canvas:#111a29;--surface:#172235;--ink:#eff6ff;--muted:#b1c0d3;--line:#34455e;--accent:#7dd3fc;--accent-soft:#12324a;--red:#ffb4ac;--red-soft:#482523;--amber:#ffd68a;--amber-soft:#423313;--shadow:0 12px 32px rgba(0,0,0,.2)}.workspace-nav a[aria-current="page"]{background:#7dd3fc;color:#082f49}.period-link--active{color:#bae6fd}.keyword-chip{border-color:#315d75;color:#cbefff}.scope-note{border-color:#315d75;color:#cbefff}.distribution-bar{background:#2a3950}.chart-line--total{stroke:#7dd3fc}.chart-line--red{stroke:#ffb4ac}.chart-line--yellow{stroke:#ffd68a}.legend-total{background:#7dd3fc}.legend-red{background:#ffb4ac}.legend-yellow{background:#ffd68a}.trend-note--down{color:#a4e2c0;background:#173a2b}}'
         '</style></head><body><main class="page">'
         '<nav class="workspace-nav" aria-label="舆情工作台"><a href="/review'
         + _q(token)
@@ -628,17 +665,18 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         f'<a class="secondary-link" href="/console/export.csv{_q(token, days=days)}">导出 CSV</a></div></header>'
         + filter_form
         + '<section class="metrics" aria-label="舆情核心指标">'
-        f'<article class="metric"><span>有效提及</span><strong>{stats.get("valid_mentions", 0)}</strong><small>回溯 {stats.get("backfill_mentions", 0)} · 投递 P95 {stats.get("delivery_p95_seconds") if stats.get("delivery_p95_seconds") is not None else "暂无"}秒</small></article>'
+        f'<article class="metric"><span>传播链接</span><strong>{stats.get("valid_mentions", 0)}</strong><small>全部有效公开记录 · 回溯 {stats.get("backfill_mentions", 0)}</small></article>'
+        f'<article class="metric"><span>独立传播簇</span><strong>{stats.get("story_clusters", 0)}</strong><small class="trend-note trend-note--{trend_class}">{escape(str(stats.get("trend", {}).get("label") or "暂无趋势"))}</small></article>'
+        f'<article class="metric"><span>转载扩散</span><strong>{stats.get("syndicated_mentions", 0)}</strong><small>社媒扩散 {stats.get("social_amplifications", 0)} 条</small></article>'
+        f'<article class="metric metric--risk"><span>新增实质信号</span><strong>{stats.get("substantive_updates", 0)}</strong><small>紧急 {stats.get("urgent_mentions", 0)} · 传播突增 {stats.get("surge_mentions", 0)}</small></article>'
         f'<article class="metric"><span>社媒提及</span><strong>{stats.get("social_mentions", 0)}</strong><small>公开平台内容</small></article>'
-        f'<article class="metric"><span>独立传播事件</span><strong>{stats.get("unique_events", 0)}</strong><small class="trend-note trend-note--{trend_class}">{escape(str(stats.get("trend", {}).get("label") or "暂无趋势"))}</small></article>'
-        f'<article class="metric metric--risk"><span>紧急内容</span><strong>{stats.get("urgent_mentions", 0)}</strong><small>需要负责人优先复核</small></article>'
         f'<article class="metric"><span>待回应</span><strong>{stats.get("pending_responses", 0)}</strong><small>待判断或建议回应</small></article>'
-        f'<article class="metric"><span>传播突增</span><strong>{stats.get("surge_mentions", 0)}</strong><small>达到互动阈值</small></article>'
         '</section>'
+        '<section class="scope-note"><strong>阅读顺序：</strong>先看“传播链接”判断声量，再看“独立传播簇”判断是否只是转载，最后以“新增实质信号”决定是否升级处置。</section>'
         '<section class="grid"><article class="panel"><div class="panel-head"><div><h2>每日新增与风险走线</h2><p class="panel-description">按系统收录时间统计；排除历史回溯，今日为截至当前的部分数据。</p></div>'
         '<div class="legend"><span><i class="legend-published"></i>内容发布</span><span><i class="legend-total"></i>系统发现</span><span><i class="legend-red"></i>红色</span><span><i class="legend-yellow"></i>黄色</span></div></div>'
         + _trend_chart(stats.get("daily", []))
-        + '<details class="daily-details"><summary>查看每日明细</summary><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>日期</th><th>发布量</th><th>发现量</th><th>红色</th><th>黄色</th><th>负面</th></tr></thead><tbody>'
+        + '<details class="daily-details"><summary>查看每日明细</summary><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>日期</th><th>发布量</th><th>新链接</th><th>新传播簇</th><th>实质信号</th><th>红色</th><th>黄色</th><th>负面</th></tr></thead><tbody>'
         + daily_rows
         + '</tbody></table></div></details></article>'
         '<aside class="panel"><div class="panel-head"><div><h2>自动归纳</h2><p class="panel-description">仅依据当前收录、分类与证据状态生成。</p></div></div><ul class="analysis-list">'
@@ -655,8 +693,8 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         + '</article></section>'
         '<section class="distribution-grid"><article class="panel"><h2>平台分布</h2><p class="panel-description">按公开内容所在平台归类。</p>'
         + platform_rows
-        + '</article><article class="panel"><h2>监测主题</h2><p class="panel-description">召回专项与品牌重大风险独立统计。</p>'
-        + campaign_rows
+        + '</article><article class="panel"><h2>传播结构</h2><p class="panel-description">区分官方事实源、转载扩散和新增实质信号。</p>'
+        + story_role_rows
         + '</article><article class="panel"><h2>回应状态</h2><p class="panel-description">逐条处置闭环。</p>'
         + response_rows
         + '</article></section>'
@@ -671,7 +709,7 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         + '</tbody></table></div></article><aside class="panel"><div class="panel-head"><div><h2>各平台发现走线</h2><p class="panel-description">右列为最近 7 个自然日的发现量序列。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>平台</th><th>窗口总量</th><th>近 7 日</th></tr></thead><tbody>'
         + _platform_trend_rows(stats.get("platform_trends", []))
         + '</tbody></table></div></aside></section>'
-        '<section class="panel"><div class="panel-head"><div><h2>跨平台扩散</h2><p class="panel-description">按事件指纹归并，显示同一传播事件出现的平台数量。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>事件</th><th>平台数</th><th>平台</th></tr></thead><tbody>'
+        '<section class="panel"><div class="panel-head"><div><h2>跨平台扩散</h2><p class="panel-description">按传播簇归并，同一新闻稿的网站与社媒链接不再误认为多个独立事件。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>事件</th><th>平台数</th><th>平台</th></tr></thead><tbody>'
         + _cross_platform_rows(stats.get("cross_platform_events", []))
         + '</tbody></table></div></section>'
         '<section class="panel"><div class="panel-head"><div><h2>平台覆盖矩阵</h2><p class="panel-description">零记录仅表示当前来源未发现，不代表平台没有讨论；持牌源、公开索引与历史回溯必须分开解释。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>平台</th><th>提及</th><th>覆盖等级</th><th>最近发现</th><th>P95 发现延迟（秒）</th></tr></thead><tbody>'
@@ -680,6 +718,6 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         '<section class="panel"><div class="panel-head"><div><h2>采集源健康</h2><p class="panel-description">直接反映调度器的最近成功与连续失败；与平台零记录分开判断。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>采集源</th><th>通道</th><th>状态</th><th>最近成功</th><th>最近尝试</th><th>连续失败</th></tr></thead><tbody>'
         + _source_health_rows(stats.get("source_health", []))
         + '</tbody></table></div></section>'
-        f'<p class="footer-note">口径：北京时间；按系统收录时间聚合；历史回溯计入总量并单独保留字段；事件指纹用于去重观察，不等同于法律事实认定。新收录 {stats.get("new_mentions", 0)} 条，历史回溯 {stats.get("backfill_mentions", 0)} 条。</p>'
+        f'<p class="footer-note">口径：北京时间；传播链接保留每个公开网页/帖子；传播簇将召回原始新闻稿及其普通转载归并；新增实质信号是自动筛查结果，必须人工核实，不等同于事实或法律结论。新收录 {stats.get("new_mentions", 0)} 条，历史回溯 {stats.get("backfill_mentions", 0)} 条。</p>'
         '</main></body></html>'
     )

@@ -200,6 +200,15 @@ class DeliveryClient:
 
     def mention_batch_payload(self, rows: List[Dict[str, object]], priority: str) -> Dict[str, object]:
         urgent = priority == "urgent"
+        recall_batch = bool(rows) and all(row.get("campaign") == "recall_26_659" for row in rows)
+        cluster_count = len({str(row.get("story_cluster_key")) for row in rows if row.get("story_cluster_key")})
+        syndicated_count = sum(bool(row.get("is_syndicated")) for row in rows)
+        substantive_count = len({
+            str(row.get("story_cluster_key") or row.get("mention_id") or row.get("source_url"))
+            for row in rows if row.get("has_substantive_update")
+        })
+        news_reposts = sum(row.get("story_role") == "news_repost" for row in rows)
+        social_amplifications = sum(row.get("story_role") == "social_amplification" for row in rows)
         contains_review = any(bool(row.get("needs_human_review")) for row in rows)
         urgent_rows = [row for row in rows if row.get("notification_priority") == "urgent"]
         # A mixed batch may contain an unverified routine row alongside a
@@ -209,16 +218,27 @@ class DeliveryClient:
             bool(row.get("needs_human_review")) for row in urgent_rows
         )
         lines = [
-            "### 【OCOOPA 公开舆情首次发现】" + ("（紧急）" if urgent else ""),
+            (
+                "### 【OCOOPA 召回传播更新】"
+                if recall_batch else "### 【OCOOPA 公开舆情首次发现】"
+            ) + ("（紧急）" if urgent else ""),
             "",
             "#### 总览",
-            f"- 本轮有效新提及：{len(rows)} 条",
+            f"- 本轮新增传播链接：{len(rows)} 条",
+            f"- 独立传播簇：{cluster_count or len(rows)} 个",
+            f"- 转载扩散：{syndicated_count} 条（新闻 {news_reposts}｜社媒 {social_amplifications}）",
+            (
+                f"- 新增实质信号：{substantive_count} 条，请优先核实。"
+                if substantive_count
+                else "- 新增实质信号：自动规则未识别到；不等同于人工核实结论。"
+            ),
             f"- 处置优先级：{'紧急复核' if urgent else '常规复核'}",
-            "- 系统收到后已立即登记；同一事件链接已合并展示。",
+            "- 全部链接均已登记；数量分为传播链接与独立事实口径。",
             "",
             "#### 重点信息",
         ]
         for index, row in enumerate(rows, 1):
+            role_label = str(row.get("story_role_label") or "独立讨论")
             metrics = "｜".join(
                 f"{label}{row.get(key)}"
                 for key, label in (
@@ -229,7 +249,7 @@ class DeliveryClient:
             )
             lines.extend(
                 [
-                    f"{index}. **{str(row.get('platform') or 'web').upper()}｜{str(row.get('content_type') or '内容')}**",
+                    f"{index}. **{str(row.get('platform') or 'web').upper()}｜{role_label}**",
                     f"   - 摘要：{str(row.get('summary_zh') or row.get('title') or '')[:220]}"
                     + ("（需人工核实）" if row.get("needs_human_review") else ""),
                     f"   - 主题：{row.get('campaign') or 'brand_major_risk'}｜建议：{row.get('recommended_action') or 'monitor'}",
@@ -240,11 +260,19 @@ class DeliveryClient:
             [
                 "",
                 "#### 下一步",
-                "- 打开复核页核对原文、事实摘要与评论建议；是否介入及最终话术由人工决定。",
+                (
+                    "- 先核实新增实质信号，再决定是否升级 PR/法务或进行评论引导。"
+                    if substantive_count
+                    else "- 当前以转载扩散为主；打开复核页抽查原文，持续观察是否出现新事实或高传播帖子。"
+                ),
             ]
         )
         return {
-            "title": f"OCOOPA 公开舆情（{len(rows)} 条{'·紧急' if urgent else ''}）",
+            "title": (
+                f"OCOOPA 召回传播总览（{len(rows)} 个新链接{'·紧急' if urgent else ''}）"
+                if recall_batch
+                else f"OCOOPA 公开舆情（{len(rows)} 条{'·紧急' if urgent else ''}）"
+            ),
             "text": "\n".join(lines),
             "suppress_at": not urgent or urgent_needs_review,
             "needs_human_review": urgent_needs_review,
