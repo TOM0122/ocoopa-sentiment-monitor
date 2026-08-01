@@ -55,6 +55,7 @@ def settings(db_path):
 class ThirdRoundOptimizationTests(unittest.TestCase):
     def make_db(self):
         tmp = tempfile.NamedTemporaryFile(delete=True)
+        self.addCleanup(tmp.close)
         db = Database(tmp.name)
         db.init()
         db.seed_keywords(DEFAULT_KEYWORDS)

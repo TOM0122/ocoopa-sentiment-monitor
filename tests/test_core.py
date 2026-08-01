@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -439,12 +440,40 @@ class CoreTests(unittest.TestCase):
             p0_health_threshold_minutes=base.p0_health_threshold_minutes,
             backfill_days=180,
             request_timeout_seconds=base.request_timeout_seconds,
+            session_secret="independent-session-secret",
         )
         report = run_doctor(prod_settings, production=True)
         self.assertTrue(report.ok)
         self.assertEqual(report.errors, [])
         self.assertEqual(report.settings_summary["db_backend"], "postgres")
         self.assertTrue(report.settings_summary["db_url_configured"])
+
+    def test_production_doctor_supports_least_privilege_service_roles(self):
+        base = settings("/tmp/test.db")
+        web_settings = replace(
+            base,
+            db_url="postgresql://user:pass@example.com:5432/db",
+            review_token="production-review-token",
+            session_secret="independent-session-secret",
+            allow_query_token=False,
+        )
+        web_report = run_doctor(web_settings, production=True, role="web")
+        self.assertTrue(web_report.ok)
+        self.assertEqual(web_report.settings_summary["role"], "web")
+
+        scheduler_settings = replace(
+            base,
+            db_url="postgresql://user:pass@example.com:5432/db",
+            alert_channel="dingtalk",
+            alert_webhook_url="https://oapi.dingtalk.com/robot/send?access_token=xxx",
+            alert_webhook_secret="secret",
+            llm_provider="deepseek",
+            llm_model="deepseek-v4-flash",
+            llm_api_key="key",
+        )
+        scheduler_report = run_doctor(scheduler_settings, production=True, role="scheduler")
+        self.assertTrue(scheduler_report.ok)
+        self.assertEqual(scheduler_report.settings_summary["role"], "scheduler")
 
     def test_database_factory_prefers_postgres_url(self):
         base = settings("/tmp/local.db")
@@ -820,8 +849,10 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(db.is_incident_suppressed(db.get_fingerprint_by_incident(iid)))
         self.assertFalse(apply_mark(db, iid, "bogus")[0])
         self.assertFalse(apply_mark(db, 999999, "muted")[0])
-        html = render_review_page(db.list_recent_incidents(10), token="t")
+        html = render_review_page(db.list_recent_incidents(10), token="t", csrf_token="csrf-token")
         self.assertIn("/review/mark", html)
+        self.assertNotIn("/review/mark?", html)
+        self.assertIn('name="csrf" value="csrf-token"', html)
         self.assertIn("误报", html)
         self.assertIn("先处理需要判断的事件", html)
         self.assertIn("分析看板", html)

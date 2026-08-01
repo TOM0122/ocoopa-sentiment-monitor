@@ -123,6 +123,7 @@ class RecallRegistryService:
             if (
                 row.get("sync_status") != "pending"
                 or row.get("has_alert")
+                or row.get("has_mention_notification")
                 or row.get("backfill")
                 or self.db.is_incident_suppressed(str(row.get("event_fingerprint") or ""))
             ):

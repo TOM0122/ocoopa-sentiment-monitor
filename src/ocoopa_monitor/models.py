@@ -42,6 +42,18 @@ class RawItem:
     language: Optional[str] = None
     country_or_market: Optional[str] = None
     tos_method: str = "rss"
+    platform: str = "web"
+    content_type: str = "article"
+    provider: str = ""
+    provider_item_id: str = ""
+    parent_url: str = ""
+    discovery_method: str = "public_feed"
+    coverage_tier: str = "public_index"
+    provider_added_at: Optional[datetime] = None
+    view_count: Optional[int] = None
+    like_count: Optional[int] = None
+    comment_count: Optional[int] = None
+    share_count: Optional[int] = None
 
 
 @dataclass
@@ -69,6 +81,19 @@ class Mention:
     tos_method: str = "rss"
     fetch_status: str = "ok"
     fetch_error: Optional[str] = None
+    platform: str = "web"
+    content_type: str = "article"
+    provider: str = ""
+    provider_item_id: str = ""
+    parent_url: str = ""
+    discovery_method: str = "public_feed"
+    coverage_tier: str = "public_index"
+    provider_added_at: Optional[datetime] = None
+    discovery_latency_seconds: Optional[int] = None
+    view_count: Optional[int] = None
+    like_count: Optional[int] = None
+    comment_count: Optional[int] = None
+    share_count: Optional[int] = None
     id: Optional[int] = None
 
 
@@ -90,6 +115,11 @@ class AnalysisResult:
     evidence_check_passed: bool
     evidence_check_notes: str
     needs_human_review: bool
+    campaign: str = "brand_major_risk"
+    relevance: float = 0.0
+    novelty_type: str = "new_mention"
+    notification_priority: str = "standard"
+    recommended_action: str = "monitor"
     analysis_created_at: datetime = field(default_factory=utcnow)
     review_status: str = "unreviewed"
     id: Optional[int] = None

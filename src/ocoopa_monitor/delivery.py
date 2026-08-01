@@ -167,6 +167,7 @@ class DeliveryClient:
         needs_human_review: bool,
         sent_at: datetime,
         delivery_latency_seconds: Optional[int] = None,
+        notification_priority: str = "urgent",
     ) -> Dict[str, object]:
         prefix = "【红色舆情警报】" if risk_level == "red" else "【舆情提醒】"
         review_note = "\n\n**需人工核实：证据校验未完全通过，勿作为确证事实外传。**" if needs_human_review else ""
@@ -193,4 +194,60 @@ class DeliveryClient:
             "needs_human_review": needs_human_review,
             "delivery_latency_seconds": delivery_latency_seconds,
             "sent_at": sent_at.isoformat(),
+            "notification_priority": notification_priority,
+            "suppress_at": notification_priority != "urgent",
+        }
+
+    def mention_batch_payload(self, rows: List[Dict[str, object]], priority: str) -> Dict[str, object]:
+        urgent = priority == "urgent"
+        contains_review = any(bool(row.get("needs_human_review")) for row in rows)
+        urgent_rows = [row for row in rows if row.get("notification_priority") == "urgent"]
+        # A mixed batch may contain an unverified routine row alongside a
+        # verified emergency. Only suppress @ when every urgent row itself
+        # still needs human verification.
+        urgent_needs_review = bool(urgent_rows) and all(
+            bool(row.get("needs_human_review")) for row in urgent_rows
+        )
+        lines = [
+            "### 【OCOOPA 公开舆情首次发现】" + ("（紧急）" if urgent else ""),
+            "",
+            "#### 总览",
+            f"- 本轮有效新提及：{len(rows)} 条",
+            f"- 处置优先级：{'紧急复核' if urgent else '常规复核'}",
+            "- 系统收到后已立即登记；同一事件链接已合并展示。",
+            "",
+            "#### 重点信息",
+        ]
+        for index, row in enumerate(rows, 1):
+            metrics = "｜".join(
+                f"{label}{row.get(key)}"
+                for key, label in (
+                    ("view_count", "浏览 "), ("like_count", "赞 "),
+                    ("comment_count", "评 "), ("share_count", "转 "),
+                )
+                if row.get(key) is not None
+            )
+            lines.extend(
+                [
+                    f"{index}. **{str(row.get('platform') or 'web').upper()}｜{str(row.get('content_type') or '内容')}**",
+                    f"   - 摘要：{str(row.get('summary_zh') or row.get('title') or '')[:220]}"
+                    + ("（需人工核实）" if row.get("needs_human_review") else ""),
+                    f"   - 主题：{row.get('campaign') or 'brand_major_risk'}｜建议：{row.get('recommended_action') or 'monitor'}",
+                    f"   - {metrics + '｜' if metrics else ''}{short_markdown_link(row.get('source_url'))}",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "#### 下一步",
+                "- 打开复核页核对原文、事实摘要与评论建议；是否介入及最终话术由人工决定。",
+            ]
+        )
+        return {
+            "title": f"OCOOPA 公开舆情（{len(rows)} 条{'·紧急' if urgent else ''}）",
+            "text": "\n".join(lines),
+            "suppress_at": not urgent or urgent_needs_review,
+            "needs_human_review": urgent_needs_review,
+            "contains_human_review": contains_review,
+            "notification_priority": priority,
         }

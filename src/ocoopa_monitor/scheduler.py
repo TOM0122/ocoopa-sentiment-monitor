@@ -11,6 +11,7 @@ from .config import Settings
 from .db import Database
 from .delivery import DeliveryClient, short_markdown_link
 from .pipeline import MonitorPipeline
+from .models import utcnow
 from .outbox import DeliveryOutboxWorker
 from .reports import DailyReportService
 from .recall import RecallRegistryService
@@ -25,6 +26,7 @@ HEALTH_CHECK_INTERVAL_MINUTES = 30
 class SchedulerState:
     last_high_run: Optional[datetime] = None
     last_regular_run: Optional[datetime] = None
+    last_licensed_run: Optional[datetime] = None
     last_daily_report_date: Optional[str] = None
     last_health_run: Optional[datetime] = None
 
@@ -58,7 +60,16 @@ class SimpleScheduler:
         so historical data is not re-ingested and no alert storm occurs.
         """
         if self.db.is_bootstrapped():
-            LOGGER.info("already bootstrapped; enabling real-time alerts")
+            if not self.db.get_state("public_social_backfill_completed_at"):
+                LOGGER.info("public social discovery upgrade: running silent 30-day backfill")
+                self._run_upgrade_backfill("regular", "public_social_backfill_completed_at")
+                self.state.last_regular_run = utcnow()
+            licensed_sources = self.db.get_sources("licensed")
+            if licensed_sources and not self.db.get_state("brandwatch_backfill_completed_at"):
+                LOGGER.info("licensed source enabled: running silent 30-day backfill")
+                self._run_upgrade_backfill("licensed", "brandwatch_backfill_completed_at")
+                self.state.last_licensed_run = utcnow()
+            LOGGER.info("already bootstrapped; each lane will enable real-time after its own backfill")
             return
         LOGGER.info(
             "cold start detected: running silent backfill (%s days) before real-time alerts",
@@ -87,9 +98,22 @@ class SimpleScheduler:
             LOGGER.info("high lane result=%s", pipeline.run_lane("high"))
             self.state.last_high_run = now
         if self._due(self.state.last_regular_run, self.settings.regular_lane_interval_minutes, now):
-            LOGGER.info("running regular lane")
-            LOGGER.info("regular lane result=%s", pipeline.run_lane("regular"))
+            if not self.db.get_state("public_social_backfill_completed_at"):
+                LOGGER.info("retrying silent public-social backfill")
+                self._run_upgrade_backfill("regular", "public_social_backfill_completed_at")
+            else:
+                LOGGER.info("running regular lane")
+                LOGGER.info("regular lane result=%s", pipeline.run_lane("regular"))
             self.state.last_regular_run = now
+        if self._due(self.state.last_licensed_run, self.settings.licensed_lane_interval_minutes, now):
+            if self.db.get_sources("licensed"):
+                if not self.db.get_state("brandwatch_backfill_completed_at"):
+                    LOGGER.info("retrying silent licensed-source backfill")
+                    self._run_upgrade_backfill("licensed", "brandwatch_backfill_completed_at")
+                else:
+                    LOGGER.info("running licensed social lane")
+                    LOGGER.info("licensed lane result=%s", pipeline.run_lane("licensed"))
+            self.state.last_licensed_run = now
         self._maybe_health_check(now)
         self._maybe_escalate_unacked(now)
         self._maybe_daily_report(now)
@@ -147,27 +171,48 @@ class SimpleScheduler:
         unhealthy = {s["source_name"]: s for s in self.health.check()}
         # Drop recovered sources so a future failure re-alerts.
         self._alerted_unhealthy &= set(unhealthy)
-        # Only P0 sources page the team; P1 commercial-API quota failures are expected.
-        new_p0 = [
+        # P0 failures page the owner. Licensed providers also notify because a
+        # silent outage directly invalidates social coverage, but do not @.
+        candidates = [
             s
             for name, s in unhealthy.items()
-            if name not in self._alerted_unhealthy and str(s.get("priority")) == "P0"
+            if name not in self._alerted_unhealthy
+            and (str(s.get("priority")) == "P0" or str(s.get("lane")) == "licensed")
         ]
-        if not new_p0:
+        if not candidates:
             return
-        for s in new_p0:
-            self._alerted_unhealthy.add(s["source_name"])
-        lines = ["### 【源健康告警】以下 P0 抓取源失联/连续失败，可能正在漏报：", ""]
-        for s in new_p0:
-            lines.append(
-                f"- {s['source_name']} status={s.get('health_status')} "
-                f"last_success={s.get('last_success_at')} failures={s.get('consecutive_failures')}"
-            )
-        try:
-            self.delivery.send_text("Ocoopa 源健康告警", "\n".join(lines), suppress_at=False)
-            LOGGER.warning("source-health alert sent for %s", [s["source_name"] for s in new_p0])
-        except Exception:
-            LOGGER.exception("failed to deliver source-health alert")
+        for group, suppress_at in (
+            ([s for s in candidates if str(s.get("priority")) == "P0"], False),
+            ([s for s in candidates if str(s.get("priority")) != "P0"], True),
+        ):
+            if not group:
+                continue
+            label = "P0" if not suppress_at else "持牌社媒"
+            lines = [f"【源健康告警】以下 {label} 采集源失联/连续失败，可能正在漏报：", ""]
+            for source in group:
+                lines.append(
+                    f"- {source['source_name']} status={source.get('health_status')} "
+                    f"last_success={source.get('last_success_at')} failures={source.get('consecutive_failures')}"
+                )
+            try:
+                self.delivery.send_text("Ocoopa 源健康告警", "\n".join(lines), suppress_at=suppress_at)
+            except Exception:
+                LOGGER.exception("failed to deliver source-health alert")
+                continue
+            self._alerted_unhealthy.update(source["source_name"] for source in group)
+            LOGGER.warning("source-health alert sent for %s", [source["source_name"] for source in group])
+
+    def _run_upgrade_backfill(self, lane: str, state_key: str) -> bool:
+        result = MonitorPipeline(self.db, self.settings, delivery_client=self.delivery).run_lane(
+            lane, backfill=True, since_days=30
+        )
+        if not result["sources_attempted"] or result["sources_failed"]:
+            # Keep this lane silent and retry on its normal cadence, while the
+            # P0 high lane and the rest of the scheduler continue operating.
+            LOGGER.warning("%s backfill incomplete; will retry without blocking scheduler: %s", lane, result)
+            return False
+        self.db.set_state(state_key, utcnow().isoformat())
+        return True
 
     @staticmethod
     def _due(last_run: Optional[datetime], interval_minutes: int, now: datetime) -> bool:

@@ -13,13 +13,31 @@ from .analysis_web import compute_dashboard, render_dashboard
 # same reporting window is applied on SQLite and Postgres.
 
 CSV_COLUMNS = [
+    "platform",
+    "content_type",
+    "provider",
+    "provider_item_id",
+    "coverage_tier",
+    "discovery_method",
     "published_at",
     "fetched_at",
+    "provider_added_at",
+    "discovery_latency_seconds",
     "source_name",
     "source_type",
     "risk_level",
     "sentiment",
     "category",
+    "campaign",
+    "relevance",
+    "novelty_type",
+    "notification_priority",
+    "recommended_action",
+    "response_status",
+    "view_count",
+    "like_count",
+    "comment_count",
+    "share_count",
     "title",
     "source_url",
     "summary_zh",
@@ -87,7 +105,7 @@ def _page(title: str, body: str) -> str:
 def render_search(rows: List[Dict[str, Any]], q: str, risk: str, window_days: int, token: str = "") -> str:
     form = (
         f'<form method="get" action="/console/search">'
-        f'<input type="hidden" name="token" value="{escape(token)}">'
+        f'<input type="hidden" name="days" value="{int(window_days)}">'
         f'<input name="q" placeholder="关键词/标题/来源" value="{escape(q)}">'
         f'<select name="risk"><option value="">全部风险</option>'
         + "".join(

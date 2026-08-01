@@ -17,7 +17,7 @@ from .delivery import DeliveryClient
 from .recall import RecallRegistryService
 from .reports import DailyReportService
 from .source_health import SourceHealthMonitor
-from .sources import DEFAULT_SOURCES
+from .sources import sources_for_settings
 
 
 def main() -> None:
@@ -26,7 +26,7 @@ def main() -> None:
     sub.add_parser("init-db")
     sub.add_parser("seed")
     run_lane = sub.add_parser("run-lane")
-    run_lane.add_argument("lane", choices=["high", "regular"])
+    run_lane.add_argument("lane", choices=["high", "regular", "licensed"])
     backfill = sub.add_parser("backfill")
     backfill.add_argument("--days", type=int, default=None)
     bootstrap = sub.add_parser("bootstrap")
@@ -39,6 +39,7 @@ def main() -> None:
     scheduler.add_argument("--poll-seconds", type=int, default=30)
     doctor = sub.add_parser("doctor")
     doctor.add_argument("--production", action="store_true")
+    doctor.add_argument("--role", choices=["all", "scheduler", "web"], default="all")
     doctor.add_argument("--json", action="store_true")
     review = sub.add_parser("review")
     review.add_argument("action", choices=["list", "mark"])
@@ -67,7 +68,7 @@ def main() -> None:
     if args.command == "seed":
         db.init()
         db.seed_keywords(DEFAULT_KEYWORDS)
-        db.seed_sources(DEFAULT_SOURCES)
+        db.seed_sources(sources_for_settings(settings))
         print("seeded default keywords and sources")
         return
     if args.command == "run-lane":
@@ -85,7 +86,7 @@ def main() -> None:
     if args.command == "bootstrap":
         db.init()
         db.seed_keywords(DEFAULT_KEYWORDS)
-        db.seed_sources(DEFAULT_SOURCES)
+        db.seed_sources(sources_for_settings(settings))
         days = args.days or settings.backfill_days
         pipeline = MonitorPipeline(db, settings)
         stats = pipeline.bootstrap(days)
@@ -117,7 +118,7 @@ def main() -> None:
 
         db.init()
         db.seed_keywords(DEFAULT_KEYWORDS)
-        db.seed_sources(DEFAULT_SOURCES)
+        db.seed_sources(sources_for_settings(settings))
         SimpleScheduler(db, settings).run_forever(args.poll_seconds)
         return
     if args.command == "review":
@@ -200,7 +201,7 @@ def main() -> None:
         print_json({"exported": count, "path": args.path})
         return
     if args.command == "doctor":
-        report = run_doctor(settings, production=args.production)
+        report = run_doctor(settings, production=args.production, role=args.role)
         payload = {
             "ok": report.ok,
             "errors": report.errors,

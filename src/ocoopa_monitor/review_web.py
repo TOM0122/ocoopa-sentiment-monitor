@@ -6,7 +6,7 @@ import hmac
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlsplit
 
-from .db import REVIEW_STATUSES, str_to_dt
+from .db import MENTION_ACTION_STATUSES, REVIEW_STATUSES, str_to_dt
 from .models import utcnow
 
 # Review operates on INCIDENTS (event_fingerprint), not on alerts: every
@@ -32,15 +32,6 @@ def token_ok(configured: str, provided: str) -> bool:
     if not configured:
         return True
     return bool(provided) and hmac.compare_digest(provided, configured)
-
-
-def _mark_url(incident_id: int, status: str, days: Optional[int], token: str) -> str:
-    params: Dict[str, Any] = {"incident_id": incident_id, "status": status}
-    if days is not None:
-        params["days"] = days
-    if token:
-        params["token"] = token
-    return "/review/mark?" + urlencode(params)
 
 
 def _safe_source_url(value: Any) -> str:
@@ -79,15 +70,18 @@ def _incident_priority_key(incident: Dict[str, Any]) -> Tuple[int, int, int]:
     )
 
 
-def _action_forms(incident_id: int, token: str, compact: bool) -> str:
+def _action_forms(incident_id: int, token: str, compact: bool, csrf_token: str = "") -> str:
     forms: List[str] = []
     for status, label, days, warning in _ACTIONS:
-        action = escape(_mark_url(incident_id, status, days, token), quote=True)
         confirmation = escape(f"确定要{label}吗？{warning}", quote=True)
         button_class = "review-action review-action--primary" if status == "confirmed" else "review-action"
+        hidden_days = f'<input type="hidden" name="days" value="{days}">' if days is not None else ""
         forms.append(
-            f'<form method="post" action="{action}" class="review-action-form" '
+            '<form method="post" action="/review/mark" class="review-action-form" '
             f'onsubmit="return confirm(\'{confirmation}\')">'
+            f'<input type="hidden" name="incident_id" value="{incident_id}">'
+            f'<input type="hidden" name="status" value="{escape(status, quote=True)}">'
+            f'{hidden_days}<input type="hidden" name="csrf" value="{escape(csrf_token, quote=True)}">'
             f'<button class="{button_class}" type="submit">{escape(label)}</button></form>'
         )
     actions = "".join(forms)
@@ -99,7 +93,52 @@ def _action_forms(incident_id: int, token: str, compact: bool) -> str:
     return f'<div class="review-actions" aria-label="复核操作">{actions}</div>'
 
 
-def _render_incident(incident: Dict[str, Any], token: str) -> str:
+def _render_mention(row: Dict[str, Any], csrf_token: str) -> str:
+    source_url = _safe_source_url(row.get("source_url"))
+    parent_url = _safe_source_url(row.get("parent_url"))
+    link = f'<a href="{escape(source_url, quote=True)}" target="_blank" rel="noopener noreferrer">链接 ↗</a>' if source_url else "无公开链接"
+    parent = f'<a href="{escape(parent_url, quote=True)}" target="_blank" rel="noopener noreferrer">父帖链接 ↗</a>' if parent_url else "无独立父帖"
+    status = str(row.get("response_status") or "待判断")
+    options = "".join(
+        f'<option value="{escape(value, quote=True)}"{" selected" if value == status else ""}>{escape(value)}</option>'
+        for value in MENTION_ACTION_STATUSES
+    )
+    metrics = " · ".join(
+        f"{label} {row.get(key)}"
+        for key, label in (("view_count", "浏览"), ("like_count", "点赞"), ("comment_count", "评论"), ("share_count", "分享"))
+        if row.get(key) is not None
+    ) or "平台未提供互动数据"
+    return (
+        '<article class="mention-card">'
+        f'<header><strong>{escape(str(row.get("platform") or "web").upper())}</strong>'
+        f'<span>{escape(str(row.get("content_type") or "article"))}</span>'
+        f'<span class="response-state">{escape(status)}</span></header>'
+        f'<h3>{escape(str(row.get("title") or "未命名内容"))}</h3>'
+        f'<p>{escape(str(row.get("summary_zh") or row.get("text_excerpt") or "暂无摘要"))}</p>'
+        '<dl class="mention-meta">'
+        f'<div><dt>公开作者</dt><dd>{escape(str(row.get("author_or_publisher") or "未知"))}</dd></div>'
+        f'<div><dt>发布时间</dt><dd>{escape(str(row.get("published_at") or "未知"))}</dd></div>'
+        f'<div><dt>发现时间 / 延迟</dt><dd>{escape(str(row.get("fetched_at") or "未知"))} / {escape(str(row.get("discovery_latency_seconds") if row.get("discovery_latency_seconds") is not None else "未知"))} 秒</dd></div>'
+        f'<div><dt>覆盖</dt><dd>{escape(str(row.get("coverage_tier") or "public_index"))} · {escape(str(row.get("discovery_method") or ""))}</dd></div>'
+        f'<div><dt>互动</dt><dd>{escape(metrics)}</dd></div>'
+        f'<div><dt>证据</dt><dd>{link} · {parent}</dd></div></dl>'
+        '<details class="guidance"><summary>查看介入建议与评论草稿</summary>'
+        f'<p><b>是否建议介入：</b>{escape(str(row.get("recommended_action") or "monitor"))}；{escape(str(row.get("intervention_reason") or "请人工判断"))}</p>'
+        f'<p><b>原语言建议：</b>{escape(str(row.get("draft_original") or "暂无"))}</p>'
+        f'<p><b>中文参考：</b>{escape(str(row.get("draft_zh") or "暂无"))}</p>'
+        f'<p class="risk-note"><b>事实/法律提示：</b>{escape(str(row.get("legal_risk_note") or "发布前必须复核事实"))}</p></details>'
+        '<form method="post" action="/review/mention-action" class="mention-action-form">'
+        f'<input type="hidden" name="csrf" value="{escape(csrf_token, quote=True)}">'
+        f'<input type="hidden" name="mention_id" value="{int(row.get("id") or 0)}">'
+        f'<label>处置状态<select name="status">{options}</select></label>'
+        f'<label>回应链接<input name="response_url" type="url" value="{escape(str(row.get("response_url") or ""), quote=True)}" placeholder="https://"></label>'
+        f'<label>操作人<input name="operator" value="{escape(str(row.get("operator") or ""), quote=True)}"></label>'
+        f'<label class="wide">内部备注<textarea name="internal_note" rows="2">{escape(str(row.get("internal_note") or ""))}</textarea></label>'
+        '<button type="submit">登记处置</button></form></article>'
+    )
+
+
+def _render_incident(incident: Dict[str, Any], token: str, csrf_token: str = "") -> str:
     risk = str(incident.get("risk_level_max") or "yellow")
     risk_label = "红色风险" if risk == "red" else "黄色风险"
     status_label, status_class = _status_meta(incident.get("status"))
@@ -130,7 +169,13 @@ def _render_incident(incident: Dict[str, Any], token: str) -> str:
     if str(incident.get("status") or "") == "muted" and incident.get("muted_until"):
         mute_prefix = "静音至" if _mute_is_active(incident) else "静音已于"
         muted_note = f'<span class="muted-note">{mute_prefix} {escape(str(incident["muted_until"]))}</span>'
-    actions = _action_forms(int(incident["incident_id"]), token, compact=handled)
+    actions = _action_forms(int(incident["incident_id"]), token, compact=handled, csrf_token=csrf_token)
+    mentions = incident.get("mentions") or []
+    mention_html = "".join(_render_mention(dict(row), csrf_token) for row in mentions)
+    evidence_list = (
+        f'<details class="mention-list"><summary>展开全部独立帖子 / 评论（{len(mentions)}）</summary>{mention_html}</details>'
+        if mentions else ""
+    )
     return (
         f'<article class="incident incident--{risk}" aria-label="{risk_label}：{title}">'
         '<div class="incident-header">'
@@ -146,11 +191,15 @@ def _render_incident(incident: Dict[str, Any], token: str) -> str:
         f'<div><dt>证据</dt><dd>{source}</dd></div>'
         '</dl>'
         f'{actions}'
+        f'{evidence_list}'
         '</article>'
     )
 
 
-def render_review_page(incidents: List[Dict[str, Any]], token: str = "") -> str:
+def render_review_page(
+    incidents: List[Dict[str, Any]], token: str = "", csrf_token: str = "",
+    filters: Optional[Dict[str, str]] = None,
+) -> str:
     # Preserve newest-first order inside each operational priority band.
     ordered = sorted(incidents, key=lambda it: str(it.get("last_seen_at") or ""), reverse=True)
     ordered.sort(key=_incident_priority_key)
@@ -162,12 +211,25 @@ def render_review_page(incidents: List[Dict[str, Any]], token: str = "") -> str:
         or (str(it.get("status") or "") == "muted" and not _mute_is_active(it))
         for it in ordered
     )
-    review_href = "/review" + (f"?{urlencode({'token': token})}" if token else "")
+    review_href = "/review"
     analysis_params: Dict[str, Any] = {"days": 30}
-    if token:
-        analysis_params["token"] = token
     analysis_href = "/review/analysis?" + urlencode(analysis_params)
-    rows = "".join(_render_incident(incident, token) for incident in ordered)
+    rows = "".join(_render_incident(incident, token, csrf_token) for incident in ordered)
+    filters = filters or {}
+    response_options = "".join(
+        f'<option value="{escape(value, quote=True)}"'
+        f'{" selected" if filters.get("response_status") == value else ""}>{escape(value)}</option>'
+        for value in MENTION_ACTION_STATUSES
+    )
+    filter_form = (
+        '<form class="filters" method="get" action="/review">'
+        f'<label>平台<input name="platform" value="{escape(filters.get("platform", ""), quote=True)}" placeholder="tiktok / reddit"></label>'
+        f'<label>监测主题<select name="campaign"><option value="">全部</option><option value="recall_26_659"{" selected" if filters.get("campaign") == "recall_26_659" else ""}>召回 26-659</option><option value="brand_major_risk"{" selected" if filters.get("campaign") == "brand_major_risk" else ""}>品牌重大风险</option></select></label>'
+        f'<label>风险<select name="risk"><option value="">红黄全部</option><option value="red"{" selected" if filters.get("risk") == "red" else ""}>红色</option><option value="yellow"{" selected" if filters.get("risk") == "yellow" else ""}>黄色</option></select></label>'
+        f'<label>回应状态<select name="response_status"><option value="">全部</option>{response_options}</select></label>'
+        f'<label>时间<select name="days"><option value="7"{" selected" if filters.get("days") == "7" else ""}>7 天</option><option value="30"{" selected" if filters.get("days", "30") == "30" else ""}>30 天</option><option value="90"{" selected" if filters.get("days") == "90" else ""}>90 天</option></select></label>'
+        '<button type="submit">筛选</button></form>'
+    )
     body = (
         f'<section class="incident-list" aria-label="复核事件列表">{rows}</section>'
         if rows
@@ -187,7 +249,7 @@ def render_review_page(incidents: List[Dict[str, Any]], token: str = "") -> str:
         '--red:#b42318;--red-soft:#fff1f0;--amber:#9a6700;--amber-soft:#fff8e8;--green:#1f6b49;--green-soft:#effaf4;'
         '--radius:12px}*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);'
         'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.5}.page{max-width:1120px;margin:0 auto;padding:32px 20px 56px}'
-        '.workspace-nav{display:flex;gap:6px;width:max-content;margin-bottom:26px;padding:5px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}.workspace-nav a{padding:8px 13px;border-radius:7px;color:var(--muted);font-weight:700;text-decoration:none}.workspace-nav a[aria-current="page"]{background:var(--accent);color:#fff}'
+        '.workspace-nav{display:flex;gap:6px;width:max-content;margin-bottom:26px;padding:5px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}.workspace-nav a,.logout-button{padding:8px 13px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-weight:700;text-decoration:none;cursor:pointer}.workspace-nav a[aria-current="page"]{background:var(--accent);color:#fff}.logout-form{margin:0}'
         '.page-header{padding:8px 0 24px}.eyebrow{margin:0 0 7px;color:var(--accent);font-size:.78rem;font-weight:700;letter-spacing:.08em}'
         'h1,h2,p{margin-top:0}h1{margin-bottom:8px;font-size:clamp(1.75rem,4vw,2.35rem);letter-spacing:-.03em;line-height:1.15}'
         '.intro{max-width:760px;margin:0;color:var(--muted)}.overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:20px}'
@@ -205,11 +267,13 @@ def render_review_page(incidents: List[Dict[str, Any]], token: str = "") -> str:
         '.review-action--primary{border-color:var(--accent);background:var(--accent);color:#fff}.review-action:hover{border-color:var(--accent)}.review-action--primary:hover{background:var(--accent-strong)}.review-action:active{transform:translateY(1px)}'
         '.review-action:focus-visible,.source-link:focus-visible,summary:focus-visible{outline:3px solid #7dd3fc;outline-offset:2px}.review-correction{margin-top:3px}.review-correction summary{color:var(--muted);font-size:.88rem;cursor:pointer}.review-correction .review-actions{margin-top:11px}'
         '.empty-state{padding:38px 24px;border:1px dashed #aab8c9;border-radius:var(--radius);background:var(--surface);text-align:center}.empty-state h2{font-size:1.2rem}.empty-state p{margin-bottom:0;color:var(--muted)}'
-        '@media (max-width:720px){.page{padding:24px 14px 40px}.workspace-nav{width:100%}.workspace-nav a{flex:1;text-align:center}.overview{grid-template-columns:repeat(2,minmax(0,1fr))}.incident{padding:16px}.incident-meta{grid-template-columns:1fr;gap:9px}.review-action{width:100%}.review-action-form{flex:1 1 100%}}'
+        '.filters{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end;margin:0 0 18px;padding:14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}.filters label,.mention-action-form label{display:grid;gap:5px;color:var(--muted);font-size:.78rem;font-weight:700}.filters input,.filters select,.mention-action-form input,.mention-action-form select,.mention-action-form textarea{width:100%;padding:8px;border:1px solid #b8c5d3;border-radius:7px;background:var(--surface);color:var(--ink);font:inherit}.filters button,.mention-action-form button{min-height:38px;padding:8px 12px;border:0;border-radius:8px;background:var(--accent);color:#fff;font-weight:700}.mention-list{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}.mention-list>summary,.guidance>summary{cursor:pointer;font-weight:700}.mention-card{margin-top:12px;padding:15px;border:1px solid var(--line);border-radius:10px;background:var(--canvas)}.mention-card header{display:flex;gap:8px;align-items:center;color:var(--muted);font-size:.78rem}.mention-card h3{margin:9px 0 6px;font-size:1rem}.response-state{margin-left:auto}.mention-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.mention-meta dt{color:var(--muted);font-size:.72rem;font-weight:700}.mention-meta dd{margin:2px 0;font-size:.82rem;overflow-wrap:anywhere}.guidance{margin:10px 0;padding:10px;border-left:3px solid var(--accent);background:var(--surface)}.guidance p{margin:8px 0;font-size:.86rem}.risk-note{color:var(--red)}.mention-action-form{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;align-items:end}.mention-action-form .wide{grid-column:1/-1}.mention-action-form button{justify-self:start}'
+        '@media (max-width:720px){.page{padding:24px 14px 40px}.workspace-nav{width:100%}.workspace-nav a{flex:1;text-align:center}.overview{grid-template-columns:repeat(2,minmax(0,1fr))}.incident{padding:16px}.incident-meta,.mention-meta,.filters,.mention-action-form{grid-template-columns:1fr;gap:9px}.mention-action-form .wide{grid-column:auto}.review-action{width:100%}.review-action-form{flex:1 1 100%}}'
         '@media (prefers-color-scheme:dark){:root{--canvas:#111a29;--surface:#172235;--ink:#eff6ff;--muted:#b1c0d3;--line:#34455e;--accent:#7dd3fc;--accent-strong:#bae6fd;--soft:#12324a;--shadow:0 12px 32px rgba(0,0,0,.2);--red:#ffb4ac;--red-soft:#482523;--amber:#ffd68a;--amber-soft:#423313;--green:#a4e2c0;--green-soft:#173a2b}.workspace-nav a[aria-current="page"]{background:#7dd3fc;color:#082f49}.intro,.incident-summary{color:var(--muted)}.review-guidance{color:#c8eafa}.source-link{color:var(--accent)}.review-action{background:#172235;color:var(--ink);border-color:#52657c}.review-action--primary{background:#7dd3fc;border-color:#7dd3fc;color:#082f49}.review-action--primary:hover{background:#bae6fd}}'
         '</style></head><body><main class="page"><nav class="workspace-nav" aria-label="舆情工作台">'
         f'<a href="{escape(review_href, quote=True)}" aria-current="page">事件复核</a>'
-        f'<a href="{escape(analysis_href, quote=True)}">分析看板</a></nav>'
+        f'<a href="{escape(analysis_href, quote=True)}">分析看板</a>'
+        f'<form class="logout-form" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{escape(csrf_token, quote=True)}"><button class="logout-button" type="submit">退出</button></form></nav>'
         '<header class="page-header"><p class="eyebrow">OCOOPA / 召回复核工作台</p>'
         '<h1>先处理需要判断的事件</h1><p class="intro">红色和黄色事件按待办优先级排列。请先核对原始来源，再记录结论。</p></header>'
         '<section class="overview" aria-label="本页风险概览">'
@@ -217,6 +281,7 @@ def render_review_page(incidents: List[Dict[str, Any]], token: str = "") -> str:
         f'<div class="metric metric--risk"><b>{red_count}</b><span>红色风险</span></div>'
         f'<div class="metric metric--attention"><b>{human_count}</b><span>需人工核实</span></div>'
         f'<div class="metric"><b>{pending_count}</b><span>待处理</span></div></section>'
+        f'{filter_form}'
         '<p class="review-guidance"><strong>操作影响：</strong>确认并跟进会结束当前待处理升级，但保留后续同事件告警；标记误报会永久抑制；静音 7 天为临时抑制。每次操作均需再次确认。</p>'
         f'{body}</main></body></html>'
     )

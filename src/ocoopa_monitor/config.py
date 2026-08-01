@@ -29,6 +29,14 @@ class Settings:
     p0_health_threshold_minutes: int
     backfill_days: int
     request_timeout_seconds: int
+    licensed_lane_interval_minutes: int = 5
+    brandwatch_api_token: str = ""
+    brandwatch_project_id: str = ""
+    brandwatch_query_id: str = ""
+    brandwatch_base_url: str = "https://api.brandwatch.com"
+    session_secret: str = ""
+    session_ttl_hours: int = 12
+    allow_query_token: bool = True
 
 
 def load_settings() -> Settings:
@@ -55,4 +63,12 @@ def load_settings() -> Settings:
         p0_health_threshold_minutes=int(os.getenv("OCOOPA_P0_HEALTH_THRESHOLD_MINUTES", "120")),
         backfill_days=int(os.getenv("OCOOPA_BACKFILL_DAYS", "180")),
         request_timeout_seconds=int(os.getenv("OCOOPA_REQUEST_TIMEOUT_SECONDS", "20")),
+        licensed_lane_interval_minutes=int(os.getenv("OCOOPA_LICENSED_LANE_INTERVAL_MINUTES", "5")),
+        brandwatch_api_token=os.getenv("OCOOPA_BRANDWATCH_TOKEN", ""),
+        brandwatch_project_id=os.getenv("OCOOPA_BRANDWATCH_PROJECT_ID", ""),
+        brandwatch_query_id=os.getenv("OCOOPA_BRANDWATCH_QUERY_ID", ""),
+        brandwatch_base_url=os.getenv("OCOOPA_BRANDWATCH_BASE_URL", "https://api.brandwatch.com"),
+        session_secret=os.getenv("OCOOPA_SESSION_SECRET", ""),
+        session_ttl_hours=int(os.getenv("OCOOPA_SESSION_TTL_HOURS", "12")),
+        allow_query_token=os.getenv("OCOOPA_ALLOW_QUERY_TOKEN", "true").lower() in {"1", "true", "yes"},
     )
