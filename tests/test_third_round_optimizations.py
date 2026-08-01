@@ -9,7 +9,11 @@ from unittest.mock import patch
 from ocoopa_monitor.config import Settings
 from ocoopa_monitor.db import Database
 from ocoopa_monitor.evidence import EvidenceChecker
-from ocoopa_monitor.fetchers.search_api import BraveSearchFetcher
+from ocoopa_monitor.fetchers.search_api import (
+    REGULAR_NEWS_QUERY,
+    REGULAR_SOCIAL_QUERY,
+    BraveSearchFetcher,
+)
 from ocoopa_monitor.keywords import DEFAULT_KEYWORDS
 from ocoopa_monitor.llm import MAX_LLM_RAW_TEXT_CHARS, DeepSeekProvider
 from ocoopa_monitor.models import RawItem, SourceConfig, utcnow
@@ -145,6 +149,9 @@ class ThirdRoundOptimizationTests(unittest.TestCase):
         self.assertIn("freshness=py", captured[1])
         self.assertIn("%22hand+warmer%22", captured[1])
         self.assertIn("lawsuit", captured[1])
+        self.assertLessEqual(len(REGULAR_SOCIAL_QUERY), 400)
+        self.assertLessEqual(len(REGULAR_SOCIAL_QUERY.split()), 50)
+        self.assertLessEqual(len(REGULAR_NEWS_QUERY), 200)
 
     def test_deepseek_provider_truncates_raw_text_and_retries_retryable_errors(self):
         captured = {"calls": 0, "raw_text": ""}
