@@ -30,6 +30,7 @@ from .social import (
     infer_platform,
     response_guidance,
 )
+from .syndication import assess_syndication
 from .normalize import (
     canonicalize_url,
     content_hash,
@@ -206,6 +207,7 @@ class MonitorPipeline:
                     if batch_candidate and incident_suppressed:
                         stats["alerts_suppressed_muted"] += 1
                     elif batch_candidate:
+                        syndication = assess_syndication(stored, analysis.novelty_type)
                         notification_group = (
                             "recall_26_659"
                             if is_current_recall(stored.title, stored.raw_text)
@@ -223,6 +225,12 @@ class MonitorPipeline:
                                 "recommended_action": analysis.recommended_action,
                                 "notification_priority": analysis.notification_priority,
                                 "needs_human_review": analysis.needs_human_review,
+                                "story_cluster_key": syndication.cluster_key,
+                                "story_cluster_label": syndication.cluster_label,
+                                "story_role": syndication.role,
+                                "story_role_label": syndication.role_label,
+                                "is_syndicated": syndication.is_syndicated,
+                                "has_substantive_update": syndication.has_substantive_update,
                                 "view_count": stored.view_count,
                                 "like_count": stored.like_count,
                                 "comment_count": stored.comment_count,
@@ -357,7 +365,7 @@ class MonitorPipeline:
             matched = sorted(set(matched), key=str.lower)
         digest = content_hash(title, raw_text)
         fingerprint = event_fingerprint(title, raw_text, matched)
-        return Mention(
+        mention = Mention(
             source_type=raw_item.source_type,
             source_name=raw_item.source_name,
             source_url=raw_item.source_url,
@@ -393,6 +401,8 @@ class MonitorPipeline:
             comment_count=raw_item.comment_count,
             share_count=raw_item.share_count,
         )
+        mention.duplicate_group_id = assess_syndication(mention).cluster_key
+        return mention
 
     @staticmethod
     def _source_query_terms(raw_item: RawItem) -> List[str]:

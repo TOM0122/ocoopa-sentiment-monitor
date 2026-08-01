@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 from .models import AnalysisResult, Mention
 from .recall import is_current_recall
+from .syndication import has_substantive_signal
 
 
 PLATFORM_DOMAINS = {
@@ -92,7 +93,16 @@ def assess_public_mention(mention: Mention) -> PublicAssessment:
     )
     valid = (exact_recall or (has_brand and has_safety and substantial)) and not spam and not own_account
     campaign = "recall_26_659" if exact_recall else "brand_major_risk"
-    urgent = any(term in text for term in URGENT_TERMS)
+    # Known facts copied from the CPSC release (including the reported death)
+    # are ordinary recall propagation, not a new emergency on every repost.
+    # Escalate recall content only when it adds a first-person incident claim or
+    # a genuinely new legal/regulatory action. Non-recall risks retain the
+    # broader urgent-term rule.
+    urgent = (
+        has_substantive_signal(mention.title, mention.raw_text)
+        if exact_recall
+        else any(term in text for term in URGENT_TERMS)
+    )
     novelty = "new_high_risk_claim" if urgent else ("known_recall_repost" if exact_recall else "new_mention")
     priority = "urgent" if urgent else "standard"
     if urgent:

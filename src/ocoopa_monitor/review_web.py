@@ -8,6 +8,7 @@ from urllib.parse import urlencode, urlsplit
 
 from .db import MENTION_ACTION_STATUSES, REVIEW_STATUSES, str_to_dt
 from .models import utcnow
+from .syndication import with_syndication_fields
 
 # Review operates on INCIDENTS (event_fingerprint), not on alerts: every
 # red/yellow event is reviewable here, including ones absorbed silently during
@@ -94,6 +95,7 @@ def _action_forms(incident_id: int, token: str, compact: bool, csrf_token: str =
 
 
 def _render_mention(row: Dict[str, Any], csrf_token: str) -> str:
+    row = with_syndication_fields(row)
     source_url = _safe_source_url(row.get("source_url"))
     parent_url = _safe_source_url(row.get("parent_url"))
     link = f'<a href="{escape(source_url, quote=True)}" target="_blank" rel="noopener noreferrer">链接 ↗</a>' if source_url else "无公开链接"
@@ -112,6 +114,7 @@ def _render_mention(row: Dict[str, Any], csrf_token: str) -> str:
         '<article class="mention-card">'
         f'<header><strong>{escape(str(row.get("platform") or "web").upper())}</strong>'
         f'<span>{escape(str(row.get("content_type") or "article"))}</span>'
+        f'<span class="story-role story-role--{escape(str(row.get("story_role") or "independent_mention"), quote=True)}">{escape(str(row.get("story_role_label") or "独立讨论"))}</span>'
         f'<span class="response-state">{escape(status)}</span></header>'
         f'<h3>{escape(str(row.get("title") or "未命名内容"))}</h3>'
         f'<p>{escape(str(row.get("summary_zh") or row.get("text_excerpt") or "暂无摘要"))}</p>'
@@ -121,6 +124,7 @@ def _render_mention(row: Dict[str, Any], csrf_token: str) -> str:
         f'<div><dt>发现时间 / 延迟</dt><dd>{escape(str(row.get("fetched_at") or "未知"))} / {escape(str(row.get("discovery_latency_seconds") if row.get("discovery_latency_seconds") is not None else "未知"))} 秒</dd></div>'
         f'<div><dt>覆盖</dt><dd>{escape(str(row.get("coverage_tier") or "public_index"))} · {escape(str(row.get("discovery_method") or ""))}</dd></div>'
         f'<div><dt>互动</dt><dd>{escape(metrics)}</dd></div>'
+        f'<div><dt>传播簇</dt><dd>{escape(str(row.get("story_cluster_label") or "未归类"))}</dd></div>'
         f'<div><dt>证据</dt><dd>{link} · {parent}</dd></div></dl>'
         '<details class="guidance"><summary>查看介入建议与评论草稿</summary>'
         f'<p><b>是否建议介入：</b>{escape(str(row.get("recommended_action") or "monitor"))}；{escape(str(row.get("intervention_reason") or "请人工判断"))}</p>'
@@ -267,7 +271,7 @@ def render_review_page(
         '.review-action--primary{border-color:var(--accent);background:var(--accent);color:#fff}.review-action:hover{border-color:var(--accent)}.review-action--primary:hover{background:var(--accent-strong)}.review-action:active{transform:translateY(1px)}'
         '.review-action:focus-visible,.source-link:focus-visible,summary:focus-visible{outline:3px solid #7dd3fc;outline-offset:2px}.review-correction{margin-top:3px}.review-correction summary{color:var(--muted);font-size:.88rem;cursor:pointer}.review-correction .review-actions{margin-top:11px}'
         '.empty-state{padding:38px 24px;border:1px dashed #aab8c9;border-radius:var(--radius);background:var(--surface);text-align:center}.empty-state h2{font-size:1.2rem}.empty-state p{margin-bottom:0;color:var(--muted)}'
-        '.filters{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end;margin:0 0 18px;padding:14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}.filters label,.mention-action-form label{display:grid;gap:5px;color:var(--muted);font-size:.78rem;font-weight:700}.filters input,.filters select,.mention-action-form input,.mention-action-form select,.mention-action-form textarea{width:100%;padding:8px;border:1px solid #b8c5d3;border-radius:7px;background:var(--surface);color:var(--ink);font:inherit}.filters button,.mention-action-form button{min-height:38px;padding:8px 12px;border:0;border-radius:8px;background:var(--accent);color:#fff;font-weight:700}.mention-list{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}.mention-list>summary,.guidance>summary{cursor:pointer;font-weight:700}.mention-card{margin-top:12px;padding:15px;border:1px solid var(--line);border-radius:10px;background:var(--canvas)}.mention-card header{display:flex;gap:8px;align-items:center;color:var(--muted);font-size:.78rem}.mention-card h3{margin:9px 0 6px;font-size:1rem}.response-state{margin-left:auto}.mention-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.mention-meta dt{color:var(--muted);font-size:.72rem;font-weight:700}.mention-meta dd{margin:2px 0;font-size:.82rem;overflow-wrap:anywhere}.guidance{margin:10px 0;padding:10px;border-left:3px solid var(--accent);background:var(--surface)}.guidance p{margin:8px 0;font-size:.86rem}.risk-note{color:var(--red)}.mention-action-form{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;align-items:end}.mention-action-form .wide{grid-column:1/-1}.mention-action-form button{justify-self:start}'
+        '.filters{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end;margin:0 0 18px;padding:14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}.filters label,.mention-action-form label{display:grid;gap:5px;color:var(--muted);font-size:.78rem;font-weight:700}.filters input,.filters select,.mention-action-form input,.mention-action-form select,.mention-action-form textarea{width:100%;padding:8px;border:1px solid #b8c5d3;border-radius:7px;background:var(--surface);color:var(--ink);font:inherit}.filters button,.mention-action-form button{min-height:38px;padding:8px 12px;border:0;border-radius:8px;background:var(--accent);color:#fff;font-weight:700}.mention-list{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}.mention-list>summary,.guidance>summary{cursor:pointer;font-weight:700}.mention-card{margin-top:12px;padding:15px;border:1px solid var(--line);border-radius:10px;background:var(--canvas)}.mention-card header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;color:var(--muted);font-size:.78rem}.mention-card h3{margin:9px 0 6px;font-size:1rem}.story-role{padding:2px 7px;border-radius:999px;background:var(--soft);color:var(--accent-strong);font-weight:700}.story-role--substantive_update{background:var(--red-soft);color:var(--red)}.response-state{margin-left:auto}.mention-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.mention-meta dt{color:var(--muted);font-size:.72rem;font-weight:700}.mention-meta dd{margin:2px 0;font-size:.82rem;overflow-wrap:anywhere}.guidance{margin:10px 0;padding:10px;border-left:3px solid var(--accent);background:var(--surface)}.guidance p{margin:8px 0;font-size:.86rem}.risk-note{color:var(--red)}.mention-action-form{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;align-items:end}.mention-action-form .wide{grid-column:1/-1}.mention-action-form button{justify-self:start}'
         '@media (max-width:720px){.page{padding:24px 14px 40px}.workspace-nav{width:100%}.workspace-nav a{flex:1;text-align:center}.overview{grid-template-columns:repeat(2,minmax(0,1fr))}.incident{padding:16px}.incident-meta,.mention-meta,.filters,.mention-action-form{grid-template-columns:1fr;gap:9px}.mention-action-form .wide{grid-column:auto}.review-action{width:100%}.review-action-form{flex:1 1 100%}}'
         '@media (prefers-color-scheme:dark){:root{--canvas:#111a29;--surface:#172235;--ink:#eff6ff;--muted:#b1c0d3;--line:#34455e;--accent:#7dd3fc;--accent-strong:#bae6fd;--soft:#12324a;--shadow:0 12px 32px rgba(0,0,0,.2);--red:#ffb4ac;--red-soft:#482523;--amber:#ffd68a;--amber-soft:#423313;--green:#a4e2c0;--green-soft:#173a2b}.workspace-nav a[aria-current="page"]{background:#7dd3fc;color:#082f49}.intro,.incident-summary{color:var(--muted)}.review-guidance{color:#c8eafa}.source-link{color:var(--accent)}.review-action{background:#172235;color:var(--ink);border-color:#52657c}.review-action--primary{background:#7dd3fc;border-color:#7dd3fc;color:#082f49}.review-action--primary:hover{background:#bae6fd}}'
         '</style></head><body><main class="page"><nav class="workspace-nav" aria-label="舆情工作台">'

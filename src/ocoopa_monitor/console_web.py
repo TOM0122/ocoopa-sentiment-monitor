@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List
 from urllib.parse import urlencode
 
 from .analysis_web import compute_dashboard, render_dashboard
+from .syndication import with_syndication_fields
 
 # Search and export are built on db.fetch_mentions_between() rows. Dashboard
 # aggregation lives in analysis_web and receives time-bounded alert rows so the
@@ -31,6 +32,12 @@ CSV_COLUMNS = [
     "campaign",
     "relevance",
     "novelty_type",
+    "story_cluster_key",
+    "story_cluster_label",
+    "story_role",
+    "story_role_label",
+    "is_syndicated",
+    "has_substantive_update",
     "notification_priority",
     "recommended_action",
     "response_status",
@@ -72,6 +79,7 @@ def rows_to_csv(rows: Iterable[Any]) -> str:
     writer = csv.DictWriter(buf, fieldnames=CSV_COLUMNS, extrasaction="ignore")
     writer.writeheader()
     for r in _rows(rows):
+        r = with_syndication_fields(r)
         writer.writerow({c: _csv_safe(r.get(c)) for c in CSV_COLUMNS})
     return buf.getvalue()
 
@@ -102,6 +110,20 @@ def _page(title: str, body: str) -> str:
     )
 
 
+def _render_search_row(row: Dict[str, Any]) -> str:
+    enriched = with_syndication_fields(row)
+    return (
+        "<tr>"
+        f'<td>{escape(str(enriched.get("risk_level")))}</td>'
+        f'<td>{escape(str(enriched.get("source_name") or ""))}<br>'
+        f'<span class="tag">{escape(str(enriched.get("story_role_label") or "独立讨论"))}</span></td>'
+        f'<td>{escape(str(enriched.get("title") or ""))}<br>'
+        f'<a href="{escape(str(enriched.get("source_url") or ""), quote=True)}" target="_blank" rel="noopener noreferrer">链接</a></td>'
+        f'<td>{escape(str(enriched.get("summary_zh") or ""))}</td>'
+        "</tr>"
+    )
+
+
 def render_search(rows: List[Dict[str, Any]], q: str, risk: str, window_days: int, token: str = "") -> str:
     form = (
         f'<form method="get" action="/console/search">'
@@ -114,16 +136,7 @@ def render_search(rows: List[Dict[str, Any]], q: str, risk: str, window_days: in
         )
         + '</select> <button type="submit">检索</button></form>'
     )
-    body_rows = "".join(
-        "<tr>"
-        f'<td>{escape(str(r.get("risk_level")))}</td>'
-        f'<td>{escape(str(r.get("source_name") or ""))}</td>'
-        f'<td>{escape(str(r.get("title") or ""))}<br>'
-        f'<a href="{escape(str(r.get("source_url") or ""))}" target="_blank">链接</a></td>'
-        f'<td>{escape(str(r.get("summary_zh") or ""))}</td>'
-        "</tr>"
-        for r in rows
-    )
+    body_rows = "".join(_render_search_row(row) for row in rows)
     table = (
         "<table><tr><th>风险</th><th>来源</th><th>标题</th><th>摘要</th></tr>"
         f"{body_rows or '<tr><td colspan=4>无匹配结果</td></tr>'}</table>"

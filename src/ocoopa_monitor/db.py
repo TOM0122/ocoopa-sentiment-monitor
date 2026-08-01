@@ -356,7 +356,7 @@ class Database:
                     """
                     UPDATE mentions SET
                         title=?, raw_text=?, text_excerpt=?, matched_keywords=?,
-                        content_hash=?, event_fingerprint=?, is_new=0, is_updated=?,
+                        content_hash=?, event_fingerprint=?, duplicate_group_id=?, is_new=0, is_updated=?,
                         backfill=backfill AND ?, fetched_at=?, platform=?, content_type=?,
                         provider=?, provider_item_id=?, parent_url=?, discovery_method=?,
                         coverage_tier=?, provider_added_at=?, discovery_latency_seconds=?,
@@ -370,6 +370,7 @@ class Database:
                         json.dumps(mention.matched_keywords, ensure_ascii=False),
                         mention.content_hash,
                         mention.event_fingerprint,
+                        mention.duplicate_group_id,
                         int(mention.is_updated),
                         int(mention.backfill),
                         dt_to_str(mention.fetched_at),
@@ -1552,7 +1553,7 @@ class PostgresDatabase:
                     """
                     UPDATE mentions SET
                         title=%s, raw_text=%s, text_excerpt=%s, matched_keywords=%s,
-                        content_hash=%s, event_fingerprint=%s, is_new=FALSE, is_updated=%s,
+                        content_hash=%s, event_fingerprint=%s, duplicate_group_id=%s, is_new=FALSE, is_updated=%s,
                         backfill=backfill AND %s, fetched_at=%s, platform=%s, content_type=%s,
                         provider=%s, provider_item_id=%s, parent_url=%s, discovery_method=%s,
                         coverage_tier=%s, provider_added_at=%s, discovery_latency_seconds=%s,
@@ -1566,6 +1567,7 @@ class PostgresDatabase:
                         Json(mention.matched_keywords),
                         mention.content_hash,
                         mention.event_fingerprint,
+                        mention.duplicate_group_id,
                         mention.is_updated,
                         mention.backfill,
                         mention.fetched_at,
