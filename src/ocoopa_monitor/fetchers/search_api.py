@@ -16,14 +16,22 @@ HIGH_SENSITIVITY_QUERY = (
     '(fire OR death OR lawsuit OR recall OR CPSC OR "class action" OR "26-659" '
     'OR UT3053 OR UT3056 OR "ZLS-118" OR H01)'
 )
-REGULAR_QUERY = (
-    '(("Ocoopa" OR "Ocopa" OR "Shenzhen Street Cat Technology" OR "hand warmer") '
-    '(fire OR death OR lawsuit OR recall OR burn OR overheat OR refund OR complaint OR "26-659" '
-    'OR UT3053 OR UT3056 OR "ZLS-118" OR H01) '
+# Provider limits differ: Brave accepts at most 400 characters / 50 words,
+# while GNews accepts at most 200 characters. Keep provider-specific queries so
+# one broad social discovery expression cannot silently disable both sources.
+REGULAR_SOCIAL_QUERY = (
+    '("OCOOPA" OR "hand warmer" OR "26-659" OR UT3053 OR UT3056 OR "ZLS-118" OR H01) '
+    '(recall OR fire OR burn OR death OR lawsuit OR complaint) '
     '(site:tiktok.com OR site:instagram.com OR site:facebook.com OR site:youtube.com '
-    'OR site:x.com OR site:twitter.com OR site:reddit.com OR site:trustpilot.com '
-    'OR site:sitejabber.com OR site:forums.redflagdeals.com))'
+    'OR site:x.com OR site:reddit.com OR site:trustpilot.com)'
 )
+REGULAR_NEWS_QUERY = (
+    '("OCOOPA" OR "Shenzhen Street Cat Technology" OR "26-659" OR UT3053 OR UT3056 '
+    'OR "ZLS-118" OR H01) '
+    '(recall OR fire OR burn OR death OR lawsuit OR complaint OR refund)'
+)
+# Compatibility alias for callers that imported the former shared query.
+REGULAR_QUERY = REGULAR_SOCIAL_QUERY
 
 
 class SerpAPIFetcher(Fetcher):
@@ -39,7 +47,7 @@ class SerpAPIFetcher(Fetcher):
     ) -> List[RawItem]:
         if not self.api_key:
             return []
-        query = HIGH_SENSITIVITY_QUERY if source.lane == "high" else REGULAR_QUERY
+        query = HIGH_SENSITIVITY_QUERY if source.lane == "high" else REGULAR_SOCIAL_QUERY
         params = urlencode(
             {
                 "engine": "google",
@@ -99,7 +107,7 @@ class GNewsFetcher(Fetcher):
     ) -> List[RawItem]:
         if not self.api_key:
             return []
-        query = HIGH_SENSITIVITY_QUERY if source.lane == "high" else REGULAR_QUERY
+        query = HIGH_SENSITIVITY_QUERY if source.lane == "high" else REGULAR_NEWS_QUERY
         params = urlencode(
             {
                 "q": query,
@@ -156,7 +164,7 @@ class BraveSearchFetcher(Fetcher):
     ) -> List[RawItem]:
         if not self.api_key:
             return []
-        query = HIGH_SENSITIVITY_QUERY if source.lane == "high" else REGULAR_QUERY
+        query = HIGH_SENSITIVITY_QUERY if source.lane == "high" else REGULAR_SOCIAL_QUERY
         params = urlencode(
             {
                 "q": query,

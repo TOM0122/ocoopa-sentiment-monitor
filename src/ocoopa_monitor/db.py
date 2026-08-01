@@ -308,7 +308,10 @@ class Database:
     def unhealthy_sources(self, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
         now = now or utcnow()
         with self.connect() as conn:
-            rows = conn.execute("SELECT * FROM source_health").fetchall()
+            rows = conn.execute(
+                "SELECT h.* FROM source_health h "
+                "JOIN source_configs c ON c.id=h.source_id WHERE c.active=1"
+            ).fetchall()
         unhealthy = []
         for row in rows:
             last_success = str_to_dt(row["last_success_at"])
@@ -324,7 +327,9 @@ class Database:
     def list_source_health(self) -> List[Dict[str, Any]]:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(
-                "SELECT * FROM source_health ORDER BY priority, source_name"
+                "SELECT h.* FROM source_health h "
+                "JOIN source_configs c ON c.id=h.source_id "
+                "WHERE c.active=1 ORDER BY h.priority, h.source_name"
             ).fetchall()]
 
     def upsert_mention(self, mention: Mention) -> Mention:
@@ -1498,7 +1503,10 @@ class PostgresDatabase:
     def unhealthy_sources(self, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
         now = now or utcnow()
         with self.connect() as conn:
-            rows = conn.execute("SELECT * FROM source_health").fetchall()
+            rows = conn.execute(
+                "SELECT h.* FROM source_health h "
+                "JOIN source_configs c ON c.id=h.source_id WHERE c.active=TRUE"
+            ).fetchall()
         unhealthy = []
         for row in rows:
             last_success = str_to_dt(row["last_success_at"])
@@ -1514,7 +1522,9 @@ class PostgresDatabase:
     def list_source_health(self) -> List[Dict[str, Any]]:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(
-                "SELECT * FROM source_health ORDER BY priority, source_name"
+                "SELECT h.* FROM source_health h "
+                "JOIN source_configs c ON c.id=h.source_id "
+                "WHERE c.active=TRUE ORDER BY h.priority, h.source_name"
             ).fetchall()]
 
     def upsert_mention(self, mention: Mention) -> Mention:

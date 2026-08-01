@@ -683,6 +683,14 @@ class CoreTests(unittest.TestCase):
             [SourceConfig("keep_me", "news", "P0", "high", "rss", "x://keep", alert_threshold_minutes=120)]
         )
         self.assertEqual({s.source_name for s in db.get_sources()}, {"keep_me"})
+        self.assertEqual(
+            {row["source_name"] for row in db.list_source_health()},
+            {"keep_me"},
+        )
+        self.assertNotIn(
+            "drop_me",
+            {row["source_name"] for row in db.unhealthy_sources()},
+        )
 
     def test_false_positive_suppresses_future_alerts(self):
         db, tmp = self.make_db()
