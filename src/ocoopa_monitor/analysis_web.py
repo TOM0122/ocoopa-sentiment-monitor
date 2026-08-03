@@ -226,7 +226,10 @@ def compute_dashboard(
     cluster_first_days: Dict[str, date] = {}
     substantive_clusters: set[str] = set()
     for row in data:
-        timestamp = _as_datetime(row.get("fetched_at"))
+        # first_seen_at is immutable across later polling passes. fetched_at is
+        # the most recent retrieval time and must not move an existing mention
+        # into today's "new" bucket every time a feed returns it again.
+        timestamp = _as_datetime(row.get("first_seen_at") or row.get("fetched_at"))
         if timestamp:
             day = timestamp.astimezone(tz).date()
             if day in daily_by_date and not bool(row.get("backfill")):
@@ -373,7 +376,10 @@ def compute_dashboard(
         "substantive_updates": len(substantive_clusters),
         "social_amplifications": story_roles.get("social_amplification", 0),
         "unique_events": len({str(row.get("event_fingerprint")) for row in data if row.get("event_fingerprint")}),
-        "new_mentions": sum(bool(row.get("is_new")) for row in data),
+        # Rows are already selected by immutable first_seen_at. is_new is an
+        # operational flag that becomes false on a later duplicate poll, so a
+        # historical new-count must be derived from the cohort instead.
+        "new_mentions": sum(not bool(row.get("backfill")) for row in data),
         "monitored_mentions": sum(not bool(row.get("backfill")) for row in data),
         "backfill_mentions": sum(bool(row.get("backfill")) for row in data),
         "review_needed": sum(bool(row.get("needs_human_review")) for row in data),
@@ -673,7 +679,7 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         f'<article class="metric"><span>待回应</span><strong>{stats.get("pending_responses", 0)}</strong><small>待判断或建议回应</small></article>'
         '</section>'
         '<section class="scope-note"><strong>阅读顺序：</strong>先看“传播链接”判断声量，再看“独立传播簇”判断是否只是转载，最后以“新增实质信号”决定是否升级处置。</section>'
-        '<section class="grid"><article class="panel"><div class="panel-head"><div><h2>每日新增与风险走线</h2><p class="panel-description">按系统收录时间统计；排除历史回溯，今日为截至当前的部分数据。</p></div>'
+        '<section class="grid"><article class="panel"><div class="panel-head"><div><h2>每日新增与风险走线</h2><p class="panel-description">按系统首次发现时间统计；重复巡检不会重复计数，排除历史回溯，今日为截至当前的部分数据。</p></div>'
         '<div class="legend"><span><i class="legend-published"></i>内容发布</span><span><i class="legend-total"></i>系统发现</span><span><i class="legend-red"></i>红色</span><span><i class="legend-yellow"></i>黄色</span></div></div>'
         + _trend_chart(stats.get("daily", []))
         + '<details class="daily-details"><summary>查看每日明细</summary><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>日期</th><th>发布量</th><th>新链接</th><th>新传播簇</th><th>实质信号</th><th>红色</th><th>黄色</th><th>负面</th></tr></thead><tbody>'

@@ -293,6 +293,7 @@ class SocialUpgradeTests(unittest.TestCase):
         self.assertIn("平台覆盖矩阵", html)
         self.assertIn("采集源健康", html)
         self.assertIn("内容发布", html)
+        self.assertIn("按系统首次发现时间统计", html)
         self.assertNotIn("?token=", html)
 
     def test_mixed_batch_does_not_hide_verified_urgent_at(self):

@@ -16,7 +16,7 @@ from ocoopa_monitor.fetchers.base import Fetcher
 from ocoopa_monitor.fetchers.search_api import BraveSearchFetcher, SerpAPIFetcher
 from ocoopa_monitor.keywords import DEFAULT_KEYWORDS
 from ocoopa_monitor.llm import DeepSeekProvider
-from ocoopa_monitor.models import AnalysisResult, RawItem, SourceConfig, utcnow
+from ocoopa_monitor.models import AnalysisResult, Mention, RawItem, SourceConfig, utcnow
 from ocoopa_monitor.pipeline import MonitorPipeline
 from ocoopa_monitor.reports import DailyReportService
 from ocoopa_monitor.risk import RiskRuleEngine
@@ -1114,6 +1114,64 @@ class CoreTests(unittest.TestCase):
         self.assertIn("高频关键词", html)
         self.assertIn("召回与监管", html)
         self.assertNotIn("javascript:alert", html)
+
+    def test_repeat_fetch_does_not_move_daily_discovery_or_report_count(self):
+        from ocoopa_monitor.console_web import compute_dashboard, rows_to_csv
+
+        db, _ = self.make_db()
+        first_seen = datetime(2026, 8, 1, 4, tzinfo=timezone.utc)
+        refetched = first_seen + timedelta(days=1)
+        original = Mention(
+            source_type="news",
+            source_name="repeat_feed",
+            source_url="https://example.com/stable-discovery",
+            canonical_url="https://example.com/stable-discovery",
+            title="Ocoopa recall report",
+            raw_text="Ocoopa recall report",
+            fetched_at=first_seen,
+            first_seen_at=first_seen,
+            matched_keywords=["Ocoopa recall"],
+            content_hash="stable-hash",
+            event_fingerprint="stable-event",
+            discovery_latency_seconds=60,
+        )
+        db.upsert_mention(original)
+        duplicate = replace(
+            original,
+            id=None,
+            fetched_at=refetched,
+            first_seen_at=refetched,
+            is_new=True,
+            discovery_latency_seconds=86460,
+        )
+        stored = db.upsert_mention(duplicate)
+
+        day_one_rows = db.fetch_mentions_between(
+            first_seen - timedelta(minutes=1), first_seen + timedelta(days=1)
+        )
+        day_two_rows = db.fetch_mentions_between(
+            refetched, refetched + timedelta(days=1)
+        )
+        self.assertEqual(len(day_one_rows), 1)
+        self.assertEqual(day_two_rows, [])
+        self.assertEqual(day_one_rows[0]["first_seen_at"], dt_to_str(first_seen))
+        self.assertEqual(day_one_rows[0]["fetched_at"], dt_to_str(refetched))
+        self.assertEqual(day_one_rows[0]["discovery_latency_seconds"], 60)
+        self.assertFalse(stored.is_new)
+
+        stats = compute_dashboard(
+            day_one_rows,
+            [],
+            window_days=2,
+            now=datetime(2026, 8, 2, 12, tzinfo=timezone.utc),
+        )
+        self.assertEqual([item["total"] for item in stats["daily"]], [1, 0])
+        self.assertEqual(stats["new_mentions"], 1)
+        report = DailyReportService(db).generate("Asia/Shanghai", "2026-08-01")
+        self.assertEqual(report["total_mentions"], 1)
+        self.assertEqual(report["new_mentions"], 1)
+        self.assertEqual(report["backfill_mentions"], 0)
+        self.assertIn("first_seen_at", rows_to_csv(day_one_rows).splitlines()[0])
 
 
 if __name__ == "__main__":

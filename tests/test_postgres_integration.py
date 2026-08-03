@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from uuid import uuid4
 
@@ -109,6 +110,29 @@ class PostgresIntegrationTests(unittest.TestCase):
         self.assertEqual(row["provider_item_id"], f"pg-resource-{suffix}")
         self.assertEqual(row["campaign"], "recall_26_659")
         self.assertEqual(row["response_status"], "建议回应")
+
+        # A later polling pass updates fetched_at but must not move this
+        # mention into a different daily first-discovery cohort.
+        first_seen = mention.first_seen_at
+        refreshed = replace(
+            mention,
+            id=None,
+            fetched_at=mention.fetched_at + timedelta(days=1),
+            first_seen_at=mention.first_seen_at + timedelta(days=1),
+            is_new=True,
+        )
+        refreshed = db.upsert_mention(refreshed)
+        self.assertFalse(refreshed.is_new)
+        original_day = db.fetch_mentions_between(
+            first_seen - timedelta(minutes=1), first_seen + timedelta(days=1)
+        )
+        later_day = db.fetch_mentions_between(
+            first_seen + timedelta(days=1), first_seen + timedelta(days=2)
+        )
+        stable_row = next(item for item in original_day if item["id"] == mention.id)
+        self.assertEqual(stable_row["first_seen_at"], first_seen)
+        self.assertEqual(stable_row["fetched_at"], refreshed.fetched_at)
+        self.assertFalse(any(item["id"] == mention.id for item in later_day))
 
     def test_init_adds_missing_columns_to_existing_tables(self):
         # CREATE TABLE IF NOT EXISTS never alters an existing table; init() must

@@ -101,7 +101,10 @@ def _build_clusters(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         role_counts = Counter(str(row.get("story_role") or "independent_mention") for row in members)
         risks = Counter(str(row.get("risk_level") or "unknown") for row in members)
         published = [_as_datetime(row.get("published_at")) for row in members]
-        discovered = [_as_datetime(row.get("fetched_at")) for row in members]
+        discovered = [
+            _as_datetime(row.get("first_seen_at") or row.get("fetched_at"))
+            for row in members
+        ]
         published = [value for value in published if value is not None]
         discovered = [value for value in discovered if value is not None]
         primary = members[0]
@@ -312,7 +315,8 @@ def _render_mention(
         f'<p>{escape(str(row.get("summary_zh") or row.get("text_excerpt") or "暂无摘要，请查看原文。"))}</p>'
         '<div class="evidence-facts">'
         f'<span>发布：{escape(_display_time(row.get("published_at")))}</span>'
-        f'<span>发现：{escape(_display_time(row.get("fetched_at")))}</span>'
+        f'<span>首次发现：{escape(_display_time(row.get("first_seen_at") or row.get("fetched_at")))}</span>'
+        f'<span>最近抓取：{escape(_display_time(row.get("fetched_at")))}</span>'
         f'<span>处置：{escape(str(row.get("response_status") or "待判断"))}</span>'
         + (f'<span>{escape(metrics)}</span>' if metrics else '<span>平台未提供互动数据</span>')
         + '</div><div class="evidence-actions">'
@@ -377,7 +381,9 @@ def _display_time(value: Any) -> str:
 
 
 def _row_sort_key(row: Dict[str, Any]) -> tuple:
-    timestamp = _as_datetime(row.get("fetched_at")) or datetime.min.replace(tzinfo=timezone.utc)
+    timestamp = _as_datetime(
+        row.get("first_seen_at") or row.get("fetched_at")
+    ) or datetime.min.replace(tzinfo=timezone.utc)
     return (
         bool(row.get("has_substantive_update")),
         {"red": 3, "yellow": 2, "green": 1}.get(str(row.get("risk_level")), 0),
