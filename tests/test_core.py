@@ -869,6 +869,30 @@ class CoreTests(unittest.TestCase):
         self.assertIn("需人工核实", html)
         self.assertIn('method="post"', html)
 
+    def test_review_web_bulk_mark_validates_selection_and_updates_each_event(self):
+        from ocoopa_monitor.review_web import apply_bulk_mark, render_review_page
+
+        db, tmp = self.make_db()
+        self._run_one(db, tmp, self._red_news("https://a.com/1", "Ocoopa death lawsuit filed in Nevada"))
+        self._run_one(db, tmp, self._red_news("https://b.com/2", "Ocoopa fire lawsuit filed in Oregon"))
+        incidents = db.list_recent_incidents(10)
+        ids = [incident["incident_id"] for incident in incidents]
+        self.assertGreaterEqual(len(ids), 2)
+        self.assertFalse(apply_bulk_mark(db, [], "confirmed")[0])
+        self.assertFalse(apply_bulk_mark(db, [999999], "confirmed")[0])
+        ok, message = apply_bulk_mark(db, ids[:2], "muted", days=7)
+        self.assertTrue(ok)
+        self.assertIn("2", message)
+        for incident_id in ids[:2]:
+            fingerprint = db.get_fingerprint_by_incident(incident_id)
+            self.assertTrue(db.is_incident_suppressed(fingerprint))
+
+        html = render_review_page(db.list_recent_incidents(10), csrf_token="csrf-token")
+        self.assertIn('action="/review/mark-bulk"', html)
+        self.assertIn('form="bulk-action-form"', html)
+        self.assertIn('id="bulk-select-all"', html)
+        self.assertIn("confirmBulkAction", html)
+
     def test_review_web_uses_safe_source_links_and_prioritizes_pending_work(self):
         from ocoopa_monitor.review_web import render_review_page
 

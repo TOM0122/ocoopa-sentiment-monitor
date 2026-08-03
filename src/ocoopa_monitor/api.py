@@ -21,7 +21,7 @@ from .pipeline import MonitorPipeline
 from .reports import DailyReportService
 from .outbox import DeliveryOutboxWorker
 from .delivery import DeliveryClient
-from .review_web import apply_mark, render_result, render_review_page, token_ok
+from .review_web import apply_bulk_mark, apply_mark, render_result, render_review_page, token_ok
 from .session_auth import COOKIE_NAME, CSRF_COOKIE_NAME, issue_session, new_csrf_token, verify_csrf, verify_session
 from .source_health import SourceHealthMonitor
 from .sources import sources_for_settings
@@ -260,6 +260,21 @@ if FastAPI is not None:
         except (TypeError, ValueError) as exc:
             return HTMLResponse(render_result(False, str(exc)), status_code=400)
         return HTMLResponse(render_result(ok, "逐条处置记录已更新" if ok else "未找到该舆情记录"), status_code=200 if ok else 404)
+
+    @app.post("/review/mark-bulk", response_class=HTMLResponse)
+    async def review_mark_bulk(request: Request) -> HTMLResponse:
+        form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+        if not _page_authorized(request) or not _csrf_authorized(request, form.get("csrf", [""])[0]):
+            return _unauthorized(HTMLResponse)
+        try:
+            incident_ids = [int(value) for value in form.get("incident_id", [])]
+            status = form.get("status", [""])[0]
+            raw_days = form.get("days", [""])[0]
+            days = int(raw_days) if raw_days else None
+        except (TypeError, ValueError):
+            return HTMLResponse(render_result(False, "批量复核参数无效"), status_code=400)
+        ok, message = apply_bulk_mark(db, incident_ids, status, days)
+        return HTMLResponse(render_result(ok, message, ""), status_code=200 if ok else 400)
 
     def _window(days: int, timezone_name: str = "Asia/Shanghai"):
         end = utcnow()
