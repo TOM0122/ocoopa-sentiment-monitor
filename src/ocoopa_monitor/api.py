@@ -26,6 +26,8 @@ from .session_auth import COOKIE_NAME, CSRF_COOKIE_NAME, issue_session, new_csrf
 from .source_health import SourceHealthMonitor
 from .sources import sources_for_settings
 from .topics import enrich_topic_fields
+from .interventions import intervention_status, requires_human_intervention
+from .operational import is_excluded_false_positive
 
 
 if FastAPI is not None:
@@ -166,6 +168,10 @@ if FastAPI is not None:
         campaign: str = "",
         risk: str = "",
         response_status: str = "",
+        intervention: str = "",
+        quality: str = "",
+        view: str = "queue",
+        page: int = 1,
         days: int = 30,
         authorization: str = Header(default=""),
     ) -> HTMLResponse:
@@ -173,7 +179,11 @@ if FastAPI is not None:
             return _session_redirect(f"/review?limit={min(max(limit, 1), 200)}&days={min(max(days, 1), 366)}")
         if not _page_authorized(request):
             return _unauthorized(HTMLResponse)
-        incidents = db.list_recent_incidents_detailed(min(max(limit, 1), 200))
+        view = view if view in {"queue", "library"} else "queue"
+        default_quality = "all" if view == "library" else "operational"
+        quality = quality if quality in {"operational", "excluded", "all"} else default_quality
+        page = max(page, 1)
+        incidents = db.list_recent_incidents_detailed(None, scope=view)
         start_at, _ = _window(min(max(days, 1), 366))
         incidents = [
             incident for incident in incidents
@@ -183,15 +193,25 @@ if FastAPI is not None:
                 or (datetime.fromisoformat(str(incident["last_seen_at"]).replace("Z", "+00:00")).astimezone(timezone.utc) >= start_at)
             )
         ]
-        if platform or campaign or response_status:
+        if platform or campaign or response_status or intervention or quality != "all":
             for incident in incidents:
                 incident["mentions"] = [
                     row for row in incident.get("mentions", [])
                     if (not platform or row.get("platform") == platform)
                     and (not campaign or row.get("campaign") == campaign)
                     and (not response_status or (row.get("response_status") or "待判断") == response_status)
+                    and (quality == "all" or (quality == "excluded") == is_excluded_false_positive(row))
+                    and (
+                        not intervention
+                        or (intervention == "human" and requires_human_intervention(row))
+                        or intervention_status(row) == intervention
+                    )
                 ]
             incidents = [incident for incident in incidents if incident.get("mentions")]
+        total_incidents = len(incidents)
+        page_size = min(max(limit, 10), 100)
+        start_index = (page - 1) * page_size
+        incidents = incidents[start_index : start_index + page_size]
         return HTMLResponse(
             render_review_page(
                 incidents,
@@ -199,7 +219,10 @@ if FastAPI is not None:
                 csrf_token=request.cookies.get(CSRF_COOKIE_NAME, ""),
                 filters={
                     "platform": platform, "campaign": campaign, "risk": risk,
-                    "response_status": response_status, "days": str(days),
+                    "response_status": response_status, "intervention": intervention,
+                    "quality": quality, "view": view, "days": str(days),
+                    "page": str(page), "page_size": str(page_size),
+                    "total_incidents": str(total_incidents),
                 },
             )
         )
@@ -226,9 +249,10 @@ if FastAPI is not None:
             return _unauthorized(HTMLResponse)
         try:
             mention_id = int(form.get("mention_id", ["0"])[0])
-            ok = db.update_mention_action(
+            ok = db.update_mention_intervention(
                 mention_id,
-                form.get("status", ["待判断"])[0],
+                form.get("intervention_status", ["待分流"])[0],
+                form.get("response_status", ["待判断"])[0],
                 form.get("response_url", [""])[0],
                 form.get("internal_note", [""])[0],
                 form.get("operator", [""])[0],
@@ -333,6 +357,7 @@ if FastAPI is not None:
             if (not platform or row.get("platform") == platform)
             and (not campaign or row.get("campaign") == campaign)
             and (not topic or enrich_topic_fields(dict(row)).get("topic_primary") == topic)
+            and not is_excluded_false_positive(dict(row))
         ]
         view = build_detail_view(rows, metric=metric, page=page)
         return HTMLResponse(

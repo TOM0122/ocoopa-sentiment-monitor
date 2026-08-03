@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from .db import Database
 from .delivery import short_markdown_link
+from .operational import operational_rows
 
 
 class DailyReportService:
@@ -20,10 +21,10 @@ class DailyReportService:
         report_date = date or datetime.now(tz).date().isoformat()
         local_start = datetime.combine(datetime.fromisoformat(report_date).date(), time.min, tzinfo=tz)
         local_end = local_start + timedelta(days=1)
-        rows = self.db.fetch_mentions_between(
+        rows = operational_rows(self.db.fetch_mentions_between(
             local_start.astimezone(timezone.utc),
             local_end.astimezone(timezone.utc),
-        )
+        ))
         # The query is a first-discovery cohort. is_new is mutable operational
         # state and becomes false when the same URL is polled again, so it
         # cannot be used to reconstruct a historical daily-new count.

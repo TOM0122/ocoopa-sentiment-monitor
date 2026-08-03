@@ -84,6 +84,9 @@ class Database:
             ("recommended_action", "TEXT NOT NULL DEFAULT 'monitor'"),
         ):
             self._add_column_if_missing(conn, "analysis_results", column, column_type)
+        self._add_column_if_missing(
+            conn, "mention_actions", "intervention_status", "TEXT NOT NULL DEFAULT ''"
+        )
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_mentions_provider_item "
             "ON mentions(provider, provider_item_id) "
@@ -1067,6 +1070,33 @@ class Database:
             )
             return cur.rowcount > 0
 
+    def update_mention_intervention(
+        self,
+        mention_id: int,
+        intervention_status: str,
+        response_status: str,
+        response_url: str,
+        internal_note: str,
+        operator: str,
+    ) -> bool:
+        if intervention_status not in INTERVENTION_STATUSES:
+            raise ValueError(f"invalid intervention status: {intervention_status}")
+        if response_status not in MENTION_ACTION_STATUSES:
+            raise ValueError(f"invalid mention action status: {response_status}")
+        now = dt_to_str(utcnow())
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE mention_actions SET intervention_status=?, status=?, response_url=?,
+                    internal_note=?, operator=?, acted_at=?, updated_at=? WHERE mention_id=?
+                """,
+                (
+                    intervention_status, response_status, response_url[:2000],
+                    internal_note[:4000], operator[:200], now, now, mention_id,
+                ),
+            )
+            return cur.rowcount > 0
+
     def enqueue_mention_batch(
         self, mention_ids: List[int], priority: str, payload: Dict[str, Any]
     ) -> bool:
@@ -1111,20 +1141,24 @@ class Database:
             )
         return True
 
-    def list_recent_incidents_detailed(self, limit: int = 50) -> List[Dict[str, Any]]:
-        incidents = self.list_recent_incidents(limit)
+    def list_recent_incidents_detailed(
+        self, limit: Optional[int] = 50, scope: str = "legacy"
+    ) -> List[Dict[str, Any]]:
+        incidents = self.list_recent_incidents(limit, scope=scope)
         with self.connect() as conn:
             for incident in incidents:
                 rows = conn.execute(
                     """
                     SELECT m.*, a.summary_zh, a.risk_level, a.campaign, a.relevance,
                            a.novelty_type, a.notification_priority, a.recommended_action,
-                           x.status AS response_status, x.response_url, x.internal_note,
+                           a.review_status, g.status AS incident_status,
+                           x.status AS response_status, x.intervention_status, x.response_url, x.internal_note,
                            x.operator, x.intervention_reason, x.draft_original, x.draft_zh,
                            x.legal_risk_note, x.acted_at
                     FROM mentions m
                     LEFT JOIN analysis_results a ON a.id=(SELECT id FROM analysis_results WHERE mention_id=m.id ORDER BY id DESC LIMIT 1)
                     LEFT JOIN mention_actions x ON x.mention_id=m.id
+                    LEFT JOIN incident_groups g ON g.fingerprint=m.event_fingerprint
                     WHERE m.event_fingerprint=? ORDER BY COALESCE(m.published_at, m.fetched_at) DESC
                     """,
                     (incident["fingerprint"],),
@@ -1133,7 +1167,17 @@ class Database:
         return incidents
 
     # --- Incident-level review (red/yellow events, even if never alerted) ---
-    def list_recent_incidents(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def list_recent_incidents(
+        self, limit: Optional[int] = 50, scope: str = "legacy"
+    ) -> List[Dict[str, Any]]:
+        if scope not in {"legacy", "queue", "library"}:
+            raise ValueError("invalid incident scope")
+        where = (
+            "WHERE g.risk_level_max IN ('red', 'yellow') AND g.status IN ('active', 'muted')"
+            if scope == "queue" else "WHERE g.risk_level_max IN ('red', 'yellow')" if scope == "legacy" else ""
+        )
+        limit_sql = " LIMIT ?" if limit is not None else ""
+        params: Sequence[Any] = (limit,) if limit is not None else ()
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -1147,11 +1191,10 @@ class Database:
                     SELECT id FROM analysis_results
                     WHERE mention_id = g.representative_mention_id ORDER BY id DESC LIMIT 1
                 )
-                WHERE g.risk_level_max IN ('red', 'yellow')
+                """ + where + """
                 ORDER BY g.last_seen_at DESC
-                LIMIT ?
-                """,
-                (limit,),
+                """ + limit_sql,
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1177,8 +1220,9 @@ class Database:
                 SELECT m.*, a.sentiment, a.risk_level, a.category, a.summary_zh,
                        a.escalation_reason, a.confidence, a.evidence_check_passed,
                        a.needs_human_review, a.campaign, a.relevance, a.novelty_type,
-                       a.notification_priority, a.recommended_action,
-                       x.status AS response_status, x.acted_at,
+                       a.notification_priority, a.recommended_action, a.review_status,
+                       g.status AS incident_status, x.status AS response_status,
+                       x.intervention_status, x.acted_at,
                        n.delivery_status AS notification_status,
                        n.created_at AS notification_created_at,
                        n.delivered_at AS notification_delivered_at
@@ -1188,6 +1232,7 @@ class Database:
                     WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
                 )
                 LEFT JOIN mention_actions x ON x.mention_id=m.id
+                LEFT JOIN incident_groups g ON g.fingerprint=m.event_fingerprint
                 LEFT JOIN mention_notifications n ON n.mention_id=m.id
                 WHERE substr(m.first_seen_at, 1, 10)=?
                 ORDER BY
@@ -1204,8 +1249,9 @@ class Database:
                 SELECT m.*, a.sentiment, a.risk_level, a.category, a.summary_zh,
                        a.escalation_reason, a.confidence, a.evidence_check_passed,
                        a.needs_human_review, a.campaign, a.relevance, a.novelty_type,
-                       a.notification_priority, a.recommended_action,
-                       x.status AS response_status, x.acted_at,
+                       a.notification_priority, a.recommended_action, a.review_status,
+                       g.status AS incident_status, x.status AS response_status,
+                       x.intervention_status, x.acted_at,
                        n.delivery_status AS notification_status,
                        n.created_at AS notification_created_at,
                        n.delivered_at AS notification_delivered_at
@@ -1215,6 +1261,7 @@ class Database:
                     WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
                 )
                 LEFT JOIN mention_actions x ON x.mention_id=m.id
+                LEFT JOIN incident_groups g ON g.fingerprint=m.event_fingerprint
                 LEFT JOIN mention_notifications n ON n.mention_id=m.id
                 WHERE m.first_seen_at >= ? AND m.first_seen_at < ?
                 ORDER BY
@@ -2214,6 +2261,31 @@ class PostgresDatabase:
             )
             return cur.rowcount > 0
 
+    def update_mention_intervention(
+        self,
+        mention_id: int,
+        intervention_status: str,
+        response_status: str,
+        response_url: str,
+        internal_note: str,
+        operator: str,
+    ) -> bool:
+        if intervention_status not in INTERVENTION_STATUSES:
+            raise ValueError(f"invalid intervention status: {intervention_status}")
+        if response_status not in MENTION_ACTION_STATUSES:
+            raise ValueError(f"invalid mention action status: {response_status}")
+        now = utcnow()
+        with self.connect() as conn:
+            cur = conn.execute(
+                "UPDATE mention_actions SET intervention_status=%s, status=%s, response_url=%s, "
+                "internal_note=%s, operator=%s, acted_at=%s, updated_at=%s WHERE mention_id=%s",
+                (
+                    intervention_status, response_status, response_url[:2000],
+                    internal_note[:4000], operator[:200], now, now, mention_id,
+                ),
+            )
+            return cur.rowcount > 0
+
     def enqueue_mention_batch(
         self, mention_ids: List[int], priority: str, payload: Dict[str, Any]
     ) -> bool:
@@ -2258,20 +2330,24 @@ class PostgresDatabase:
             )
         return True
 
-    def list_recent_incidents_detailed(self, limit: int = 50) -> List[Dict[str, Any]]:
-        incidents = self.list_recent_incidents(limit)
+    def list_recent_incidents_detailed(
+        self, limit: Optional[int] = 50, scope: str = "legacy"
+    ) -> List[Dict[str, Any]]:
+        incidents = self.list_recent_incidents(limit, scope=scope)
         with self.connect() as conn:
             for incident in incidents:
                 rows = conn.execute(
                     """
                     SELECT m.*, a.summary_zh, a.risk_level, a.campaign, a.relevance,
                            a.novelty_type, a.notification_priority, a.recommended_action,
-                           x.status AS response_status, x.response_url, x.internal_note,
+                           a.review_status, g.status AS incident_status,
+                           x.status AS response_status, x.intervention_status, x.response_url, x.internal_note,
                            x.operator, x.intervention_reason, x.draft_original, x.draft_zh,
                            x.legal_risk_note, x.acted_at
                     FROM mentions m
                     LEFT JOIN analysis_results a ON a.id=(SELECT id FROM analysis_results WHERE mention_id=m.id ORDER BY id DESC LIMIT 1)
                     LEFT JOIN mention_actions x ON x.mention_id=m.id
+                    LEFT JOIN incident_groups g ON g.fingerprint=m.event_fingerprint
                     WHERE m.event_fingerprint=%s ORDER BY COALESCE(m.published_at, m.fetched_at) DESC
                     """,
                     (incident["fingerprint"],),
@@ -2280,7 +2356,17 @@ class PostgresDatabase:
         return incidents
 
     # --- Incident-level review (red/yellow events, even if never alerted) ---
-    def list_recent_incidents(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def list_recent_incidents(
+        self, limit: Optional[int] = 50, scope: str = "legacy"
+    ) -> List[Dict[str, Any]]:
+        if scope not in {"legacy", "queue", "library"}:
+            raise ValueError("invalid incident scope")
+        where = (
+            "WHERE g.risk_level_max IN ('red', 'yellow') AND g.status IN ('active', 'muted')"
+            if scope == "queue" else "WHERE g.risk_level_max IN ('red', 'yellow')" if scope == "legacy" else ""
+        )
+        limit_sql = " LIMIT %s" if limit is not None else ""
+        params: Sequence[Any] = (limit,) if limit is not None else ()
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -2294,11 +2380,10 @@ class PostgresDatabase:
                     SELECT id FROM analysis_results
                     WHERE mention_id = g.representative_mention_id ORDER BY id DESC LIMIT 1
                 )
-                WHERE g.risk_level_max IN ('red', 'yellow')
+                """ + where + """
                 ORDER BY g.last_seen_at DESC
-                LIMIT %s
-                """,
-                (limit,),
+                """ + limit_sql,
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -2324,8 +2409,9 @@ class PostgresDatabase:
                 SELECT m.*, a.sentiment, a.risk_level, a.category, a.summary_zh,
                        a.escalation_reason, a.confidence, a.evidence_check_passed,
                        a.needs_human_review, a.campaign, a.relevance, a.novelty_type,
-                       a.notification_priority, a.recommended_action,
-                       x.status AS response_status, x.acted_at,
+                       a.notification_priority, a.recommended_action, a.review_status,
+                       g.status AS incident_status, x.status AS response_status,
+                       x.intervention_status, x.acted_at,
                        n.delivery_status AS notification_status,
                        n.created_at AS notification_created_at,
                        n.delivered_at AS notification_delivered_at
@@ -2335,6 +2421,7 @@ class PostgresDatabase:
                     WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
                 )
                 LEFT JOIN mention_actions x ON x.mention_id=m.id
+                LEFT JOIN incident_groups g ON g.fingerprint=m.event_fingerprint
                 LEFT JOIN mention_notifications n ON n.mention_id=m.id
                 WHERE m.first_seen_at >= %s AND m.first_seen_at < %s
                 ORDER BY
@@ -2351,8 +2438,9 @@ class PostgresDatabase:
                 SELECT m.*, a.sentiment, a.risk_level, a.category, a.summary_zh,
                        a.escalation_reason, a.confidence, a.evidence_check_passed,
                        a.needs_human_review, a.campaign, a.relevance, a.novelty_type,
-                       a.notification_priority, a.recommended_action,
-                       x.status AS response_status, x.acted_at,
+                       a.notification_priority, a.recommended_action, a.review_status,
+                       g.status AS incident_status, x.status AS response_status,
+                       x.intervention_status, x.acted_at,
                        n.delivery_status AS notification_status,
                        n.created_at AS notification_created_at,
                        n.delivered_at AS notification_delivered_at
@@ -2362,6 +2450,7 @@ class PostgresDatabase:
                     WHERE mention_id=m.id ORDER BY id DESC LIMIT 1
                 )
                 LEFT JOIN mention_actions x ON x.mention_id=m.id
+                LEFT JOIN incident_groups g ON g.fingerprint=m.event_fingerprint
                 LEFT JOIN mention_notifications n ON n.mention_id=m.id
                 WHERE m.first_seen_at >= %s::date AND m.first_seen_at < (%s::date + INTERVAL '1 day')
                 ORDER BY
@@ -2440,6 +2529,7 @@ def max_risk(left: str, right: str) -> str:
 
 REVIEW_STATUSES = ("confirmed", "false_positive", "muted")
 MENTION_ACTION_STATUSES = ("待判断", "建议回应", "已回应", "无需回应", "升级 PR/法务")
+INTERVENTION_STATUSES = ("待分流", "仅监测", "人工查看评论", "建议回应", "升级 PR/法务", "已归档")
 
 
 def _review_to_status(status: str):
@@ -2684,6 +2774,7 @@ ON mention_metrics(mention_id, captured_at);
 CREATE TABLE IF NOT EXISTS mention_actions (
     mention_id INTEGER PRIMARY KEY REFERENCES mentions(id) ON DELETE CASCADE,
     status TEXT NOT NULL DEFAULT '待判断',
+    intervention_status TEXT NOT NULL DEFAULT '',
     response_url TEXT NOT NULL DEFAULT '',
     internal_note TEXT NOT NULL DEFAULT '',
     operator TEXT NOT NULL DEFAULT '',

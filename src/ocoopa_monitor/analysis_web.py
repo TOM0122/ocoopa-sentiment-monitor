@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 
 from .syndication import ROLE_LABELS, with_syndication_fields
 from .topics import TOPIC_LABELS, enrich_topic_fields, is_public_social_parent_post
+from .interventions import intervention_status, requires_human_intervention
+from .operational import is_excluded_false_positive, operational_rows
 
 
 _SENTIMENT_LABELS = {
@@ -181,8 +183,12 @@ def compute_dashboard(
     now: Optional[datetime] = None,
     source_health: Iterable[Any] = (),
 ) -> Dict[str, Any]:
-    data = [enrich_topic_fields(with_syndication_fields(row)) for row in _rows(rows)]
-    alert_rows = _rows(alerts)
+    raw_data = [enrich_topic_fields(with_syndication_fields(row)) for row in _rows(rows)]
+    excluded_false_positives = sum(is_excluded_false_positive(row) for row in raw_data)
+    data = operational_rows(raw_data)
+    for row in data:
+        row["intervention_status"] = intervention_status(row)
+    alert_rows = operational_rows(_rows(alerts))
     health_rows = _rows(source_health)
     days = min(max(int(window_days), 1), 366)
     tz = ZoneInfo(timezone_name)
@@ -207,6 +213,7 @@ def compute_dashboard(
     content_types = Counter(str(row.get("content_type") or "article") for row in data)
     campaigns = Counter(str(row.get("campaign") or "brand_major_risk") for row in data)
     response_statuses = Counter(str(row.get("response_status") or "待判断") for row in data)
+    intervention_statuses = Counter(str(row.get("intervention_status") or "仅监测") for row in data)
     story_roles = Counter(str(row.get("story_role") or "independent_mention") for row in data)
     keyword_counter: Counter[str] = Counter()
     keyword_labels: Dict[str, str] = {}
@@ -359,7 +366,12 @@ def compute_dashboard(
         "social_mentions": sum(str(row.get("platform") or "web") in social_platforms for row in data),
         "public_social_parent_posts": sum(is_public_social_parent_post(row) for row in data),
         "urgent_mentions": sum(str(row.get("notification_priority") or "standard") == "urgent" for row in data),
-        "pending_responses": sum(str(row.get("response_status") or "待判断") in {"待判断", "建议回应"} for row in data),
+        "pending_responses": sum(requires_human_intervention(row) for row in data),
+        "manual_comment_reviews": intervention_statuses.get("人工查看评论", 0),
+        "suggested_responses": intervention_statuses.get("建议回应", 0),
+        "pr_legal_escalations": intervention_statuses.get("升级 PR/法务", 0),
+        "excluded_false_positives": excluded_false_positives,
+        "raw_collected_mentions": len(raw_data),
         "surge_mentions": surge_count,
         "alerts": len(alert_rows),
         "story_clusters": len({str(row.get("story_cluster_key")) for row in data if row.get("story_cluster_key")}),
@@ -384,6 +396,7 @@ def compute_dashboard(
         "content_type": dict(content_types),
         "campaign": dict(campaigns),
         "response_status": dict(response_statuses),
+        "intervention_status": dict(intervention_statuses),
         "story_role": dict(story_roles),
         "syndication_ratio": (
             sum(bool(row.get("is_syndicated")) for row in data) / total if total else 0.0
@@ -695,12 +708,12 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         f'<a class="secondary-link" href="/console/export.csv{_q(token, days=days)}">导出 CSV</a></div></header>'
         + filter_form
         + '<section class="metrics" aria-label="舆情核心指标">'
-        f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="links", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看有效传播链接明细"><span>有效传播链接</span><strong>{stats.get("valid_mentions", 0)}</strong><small>全部有效公开记录 · 回溯 {stats.get("backfill_mentions", 0)}</small><small class="metric-link__action">查看明细 →</small></a>'
+        f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="links", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看有效传播链接明细"><span>有效传播链接</span><strong>{stats.get("valid_mentions", 0)}</strong><small>已排除误报 {stats.get("excluded_false_positives", 0)} · 回溯 {stats.get("backfill_mentions", 0)}</small><small class="metric-link__action">查看明细 →</small></a>'
         f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="clusters", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看自动归并的独立传播簇"><span>独立传播簇</span><strong>{stats.get("story_clusters", 0)}</strong><small class="trend-note trend-note--{trend_class}">{escape(str(stats.get("trend", {}).get("label") or "暂无趋势"))}</small><small class="metric-link__action">自动归并 · 查看明细 →</small></a>'
         f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="syndicated", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看转载扩散链接"><span>转载扩散链接</span><strong>{stats.get("syndicated_mentions", 0)}</strong><small>社媒扩散 {stats.get("social_amplifications", 0)} 条</small><small class="metric-link__action">查看明细 →</small></a>'
         f'<a class="metric metric-link metric--risk" href="/review/analysis/details{_q(token, metric="substantive", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看待复核的新增实质信号"><span>新增实质信号</span><strong>{stats.get("substantive_updates", 0)}</strong><small>待人工复核 · 紧急 {stats.get("urgent_mentions", 0)} · 传播突增 {stats.get("surge_mentions", 0)}</small><small class="metric-link__action">优先查看 →</small></a>'
         f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="parent_posts", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看公开社媒母帖"><span>社媒母帖</span><strong>{stats.get("public_social_parent_posts", 0)}</strong><small>仅公开索引 · 人工查看评论</small><small class="metric-link__action">打开母帖 →</small></a>'
-        f'<article class="metric"><span>待回应</span><strong>{stats.get("pending_responses", 0)}</strong><small>待判断或建议回应</small></article>'
+        f'<a class="metric metric-link" href="/review{_q(token, view="queue", intervention="human")}" aria-label="查看需人工介入队列"><span>需人工介入</span><strong>{stats.get("pending_responses", 0)}</strong><small>看评论 {stats.get("manual_comment_reviews", 0)} · 建议回应 {stats.get("suggested_responses", 0)} · PR/法务 {stats.get("pr_legal_escalations", 0)}</small><small class="metric-link__action">查看队列 →</small></a>'
         '</section>'
         '<section class="scope-note"><strong>阅读顺序：</strong>先看“传播链接”判断声量，再看“独立传播簇”判断是否只是转载，最后以“新增实质信号”决定是否升级处置。</section>'
         '<section class="grid"><article class="panel"><div class="panel-head"><div><h2>每日新增与风险走线</h2><p class="panel-description">按系统首次发现时间统计；重复巡检不会重复计数，排除历史回溯，今日为截至当前的部分数据。</p></div>'
@@ -748,6 +761,6 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         '<section class="panel"><div class="panel-head"><div><h2>采集源健康</h2><p class="panel-description">直接反映调度器的最近成功与连续失败；与平台零记录分开判断。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>采集源</th><th>通道</th><th>状态</th><th>最近成功</th><th>最近尝试</th><th>连续失败</th></tr></thead><tbody>'
         + _source_health_rows(stats.get("source_health", []))
         + '</tbody></table></div></section>'
-        f'<p class="footer-note">口径：北京时间；传播链接保留每个公开网页/帖子；传播簇将召回原始新闻稿及其普通转载归并；新增实质信号是自动筛查结果，必须人工核实，不等同于事实或法律结论。新收录 {stats.get("new_mentions", 0)} 条，历史回溯 {stats.get("backfill_mentions", 0)} 条。</p>'
+        f'<p class="footer-note">口径：北京时间；传播链接保留每个公开网页/帖子；已人工标记为误报的 {stats.get("excluded_false_positives", 0)} 条保留在复核证据库，但不进入本页任何统计、趋势或日报。传播簇将召回原始新闻稿及其普通转载归并；新增实质信号是自动筛查结果，必须人工核实，不等同于事实或法律结论。新收录 {stats.get("new_mentions", 0)} 条，历史回溯 {stats.get("backfill_mentions", 0)} 条。</p>'
         '</main></body></html>'
     )

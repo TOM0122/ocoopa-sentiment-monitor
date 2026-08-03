@@ -862,7 +862,7 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("/review/mark?", html)
         self.assertIn('name="csrf" value="csrf-token"', html)
         self.assertIn("误报", html)
-        self.assertIn("先处理需要判断的事件", html)
+        self.assertIn("先处理需要人工判断的事件", html)
         self.assertIn("分析看板", html)
         self.assertIn("/review/analysis", html)
         self.assertIn("确认并跟进", html)

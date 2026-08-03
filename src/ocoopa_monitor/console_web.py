@@ -41,7 +41,11 @@ CSV_COLUMNS = [
     "has_substantive_update",
     "notification_priority",
     "recommended_action",
+    "review_status",
+    "incident_status",
+    "intervention_status",
     "response_status",
+    "statistical_inclusion",
     "view_count",
     "like_count",
     "comment_count",
@@ -81,6 +85,7 @@ def rows_to_csv(rows: Iterable[Any]) -> str:
     writer.writeheader()
     for r in _rows(rows):
         r = with_syndication_fields(r)
+        r["statistical_inclusion"] = "已排除误报" if str(r.get("review_status") or "") == "false_positive" or str(r.get("incident_status") or "") == "resolved" else "计入运营统计"
         writer.writerow({c: _csv_safe(r.get(c)) for c in CSV_COLUMNS})
     return buf.getvalue()
 
