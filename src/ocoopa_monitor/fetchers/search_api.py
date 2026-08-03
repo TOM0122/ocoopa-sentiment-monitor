@@ -25,6 +25,14 @@ REGULAR_SOCIAL_QUERY = (
     '(site:tiktok.com OR site:instagram.com OR site:facebook.com OR site:youtube.com '
     'OR site:x.com OR site:reddit.com OR site:trustpilot.com)'
 )
+# Targeted public-index query for the media accounts that have already
+# syndicated the recall on Facebook.  This is intentionally a separate source
+# from the broad query: it improves recall of deep /photos and /posts URLs
+# while preserving the broad multi-platform discovery lane.
+REGULAR_MEDIA_OUTLET_SOCIAL_QUERY = (
+    'site:facebook.com ("OCOOPA" OR "26-659" OR "hand warmer") '
+    '(WHIO OR WPRI OR KENS OR KARE OR "Boston 25")'
+)
 REGULAR_NEWS_QUERY = (
     '("OCOOPA" OR "Shenzhen Street Cat Technology" OR "26-659" OR UT3053 OR UT3056 '
     'OR "ZLS-118" OR H01) '
@@ -47,7 +55,7 @@ class SerpAPIFetcher(Fetcher):
     ) -> List[RawItem]:
         if not self.api_key:
             return []
-        query = HIGH_SENSITIVITY_QUERY if source.lane == "high" else REGULAR_SOCIAL_QUERY
+        query = _query_for_source(source)
         params = urlencode(
             {
                 "engine": "google",
@@ -164,7 +172,7 @@ class BraveSearchFetcher(Fetcher):
     ) -> List[RawItem]:
         if not self.api_key:
             return []
-        query = HIGH_SENSITIVITY_QUERY if source.lane == "high" else REGULAR_SOCIAL_QUERY
+        query = _query_for_source(source)
         params = urlencode(
             {
                 "q": query,
@@ -194,6 +202,10 @@ class BraveSearchFetcher(Fetcher):
             age = normalize_text(str(result.get("age") or ""))
             if not link:
                 continue
+            platform = infer_platform(link, source.source_type)
+            content_type = infer_content_type(link, platform)
+            if source.source_name == "brave_media_outlet_social" and content_type == "comment":
+                continue
             items.append(
                 RawItem(
                     source_type=source.source_type,
@@ -206,15 +218,26 @@ class BraveSearchFetcher(Fetcher):
                     language="en",
                     country_or_market="US",
                     tos_method="api",
-                    platform=infer_platform(link, source.source_type),
-                    content_type=infer_content_type(link, infer_platform(link, source.source_type)),
+                    platform=platform,
+                    content_type=content_type,
                     provider="brave",
                     provider_item_id=link,
-                    discovery_method="public_index",
+                    discovery_method=(
+                        "public_index_media_targeted"
+                        if source.source_name == "brave_media_outlet_social" else "public_index"
+                    ),
                     coverage_tier="public_index",
                 )
             )
         return items
+
+
+def _query_for_source(source: SourceConfig) -> str:
+    if source.lane == "high":
+        return HIGH_SENSITIVITY_QUERY
+    if source.source_name in {"brave_media_outlet_social", "serpapi_media_outlet_social"}:
+        return REGULAR_MEDIA_OUTLET_SOCIAL_QUERY
+    return REGULAR_SOCIAL_QUERY
 
 
 def _parse_iso(value: str) -> Optional[datetime]:
