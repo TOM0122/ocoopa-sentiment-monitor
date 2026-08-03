@@ -108,6 +108,8 @@ class SocialUpgradeTests(unittest.TestCase):
         html = render_dashboard(stats, 7)
         self.assertIn("独立传播簇", html)
         self.assertIn("新增实质信号", html)
+        self.assertNotIn("需人工介入", html)
+        self.assertNotIn('intervention=human', html)
         exported = rows_to_csv(rows)
         self.assertIn("story_cluster_key", exported.splitlines()[0])
         self.assertIn("story_cluster_label", exported.splitlines()[0])
