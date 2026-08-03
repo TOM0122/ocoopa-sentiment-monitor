@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlsplit
 
 from .db import MENTION_ACTION_STATUSES, REVIEW_STATUSES, str_to_dt
+from .interventions import INTERVENTION_STATUSES, intervention_status
 from .models import utcnow
 from .syndication import with_syndication_fields
 
@@ -100,9 +101,15 @@ def _render_mention(row: Dict[str, Any], csrf_token: str) -> str:
     parent_url = _safe_source_url(row.get("parent_url"))
     link = f'<a href="{escape(source_url, quote=True)}" target="_blank" rel="noopener noreferrer">链接 ↗</a>' if source_url else "无公开链接"
     parent = f'<a href="{escape(parent_url, quote=True)}" target="_blank" rel="noopener noreferrer">父帖链接 ↗</a>' if parent_url else "无独立父帖"
-    status = str(row.get("response_status") or "待判断")
-    options = "".join(
-        f'<option value="{escape(value, quote=True)}"{" selected" if value == status else ""}>{escape(value)}</option>'
+    intervention = intervention_status(row)
+    response_status = str(row.get("response_status") or "待判断")
+    response_label = "未登记对外回应" if response_status == "待判断" else response_status
+    intervention_options = "".join(
+        f'<option value="{escape(value, quote=True)}{" selected" if value == intervention else ""}>{escape(value)}</option>'
+        for value in INTERVENTION_STATUSES
+    )
+    response_options = "".join(
+        f'<option value="{escape(value, quote=True)}{" selected" if value == response_status else ""}>{escape(value)}</option>'
         for value in MENTION_ACTION_STATUSES
     )
     metrics = " · ".join(
@@ -115,7 +122,7 @@ def _render_mention(row: Dict[str, Any], csrf_token: str) -> str:
         f'<header><strong>{escape(str(row.get("platform") or "web").upper())}</strong>'
         f'<span>{escape(str(row.get("content_type") or "article"))}</span>'
         f'<span class="story-role story-role--{escape(str(row.get("story_role") or "independent_mention"), quote=True)}">{escape(str(row.get("story_role_label") or "独立讨论"))}</span>'
-        f'<span class="response-state">{escape(status)}</span></header>'
+        f'<span class="response-state">{escape(intervention)}</span></header>'
         f'<h3>{escape(str(row.get("title") or "未命名内容"))}</h3>'
         f'<p>{escape(str(row.get("summary_zh") or row.get("text_excerpt") or "暂无摘要"))}</p>'
         '<dl class="mention-meta">'
@@ -135,7 +142,8 @@ def _render_mention(row: Dict[str, Any], csrf_token: str) -> str:
         '<form method="post" action="/review/mention-action" class="mention-action-form">'
         f'<input type="hidden" name="csrf" value="{escape(csrf_token, quote=True)}">'
         f'<input type="hidden" name="mention_id" value="{int(row.get("id") or 0)}">'
-        f'<label>处置状态<select name="status">{options}</select></label>'
+        f'<label>人工分流<select name="intervention_status">{intervention_options}</select></label>'
+        f'<label>对外回应登记<select name="response_status">{response_options}</select><small>当前：{escape(response_label)}</small></label>'
         f'<label>回应链接<input name="response_url" type="url" value="{escape(str(row.get("response_url") or ""), quote=True)}" placeholder="https://"></label>'
         f'<label>操作人<input name="operator" value="{escape(str(row.get("operator") or ""), quote=True)}"></label>'
         f'<label class="wide">内部备注<textarea name="internal_note" rows="2">{escape(str(row.get("internal_note") or ""))}</textarea></label>'
@@ -208,6 +216,7 @@ def render_review_page(
     # Preserve newest-first order inside each operational priority band.
     ordered = sorted(incidents, key=lambda it: str(it.get("last_seen_at") or ""), reverse=True)
     ordered.sort(key=_incident_priority_key)
+    view = str((filters or {}).get("view") or "queue")
     total = len(ordered)
     red_count = sum(it.get("risk_level_max") == "red" for it in ordered)
     human_count = sum(bool(it.get("needs_human_review")) for it in ordered)
@@ -221,26 +230,58 @@ def render_review_page(
     analysis_href = "/review/analysis?" + urlencode(analysis_params)
     rows = "".join(_render_incident(incident, token, csrf_token) for incident in ordered)
     filters = filters or {}
-    response_options = "".join(
+    intervention_options = "".join(
         f'<option value="{escape(value, quote=True)}"'
-        f'{" selected" if filters.get("response_status") == value else ""}>{escape(value)}</option>'
-        for value in MENTION_ACTION_STATUSES
+        f'{" selected" if filters.get("intervention") == value else ""}>{escape(value)}</option>'
+        for value in INTERVENTION_STATUSES
     )
+    view_params = {key: value for key, value in filters.items() if key not in {"view", "page", "page_size", "total_incidents"} and value}
+    queue_href = "/review?" + urlencode({**view_params, "view": "queue", "quality": "operational"})
+    library_href = "/review?" + urlencode({**view_params, "view": "library", "quality": "all"})
+    queue_current = ' aria-current="page"' if view == "queue" else ""
+    library_current = ' aria-current="page"' if view == "library" else ""
     filter_form = (
         '<form class="filters" method="get" action="/review">'
+        f'<input type="hidden" name="view" value="{escape(view, quote=True)}">'
         f'<label>平台<input name="platform" value="{escape(filters.get("platform", ""), quote=True)}" placeholder="tiktok / reddit"></label>'
         f'<label>监测主题<select name="campaign"><option value="">全部</option><option value="recall_26_659"{" selected" if filters.get("campaign") == "recall_26_659" else ""}>召回 26-659</option><option value="brand_major_risk"{" selected" if filters.get("campaign") == "brand_major_risk" else ""}>品牌重大风险</option></select></label>'
-        f'<label>风险<select name="risk"><option value="">红黄全部</option><option value="red"{" selected" if filters.get("risk") == "red" else ""}>红色</option><option value="yellow"{" selected" if filters.get("risk") == "yellow" else ""}>黄色</option></select></label>'
-        f'<label>回应状态<select name="response_status"><option value="">全部</option>{response_options}</select></label>'
+        f'<label>风险<select name="risk"><option value="">全部</option><option value="red"{" selected" if filters.get("risk") == "red" else ""}>红色</option><option value="yellow"{" selected" if filters.get("risk") == "yellow" else ""}>黄色</option><option value="green"{" selected" if filters.get("risk") == "green" else ""}>绿色</option></select></label>'
+        f'<label>人工分流<select name="intervention"><option value="">全部</option><option value="human"{" selected" if filters.get("intervention") == "human" else ""}>需人工介入</option>{intervention_options}</select></label>'
+        f'<label>统计口径<select name="quality"><option value="operational"{" selected" if filters.get("quality", "all" if view == "library" else "operational") == "operational" else ""}>计入运营统计</option><option value="excluded"{" selected" if filters.get("quality") == "excluded" else ""}>已排除误报</option><option value="all"{" selected" if filters.get("quality", "all" if view == "library" else "operational") == "all" else ""}>全部证据</option></select></label>'
         f'<label>时间<select name="days"><option value="7"{" selected" if filters.get("days") == "7" else ""}>7 天</option><option value="30"{" selected" if filters.get("days", "30") == "30" else ""}>30 天</option><option value="90"{" selected" if filters.get("days") == "90" else ""}>90 天</option></select></label>'
         '<button type="submit">筛选</button></form>'
     )
+    heading = "先处理需要人工判断的事件" if view == "queue" else "全量证据库"
+    intro = (
+        "仅显示当前需要人工核实、查看评论、建议回应或升级的红黄事件；新闻转载默认仅监测，不等同于待回应。"
+        if view == "queue" else
+        "保留所有独立记录、已归档项目和误报审计。已标记误报的内容不会计入分析看板、趋势或日报。"
+    )
+    empty = "当前筛选范围暂无待处置事件。" if view == "queue" else "当前筛选范围暂无证据记录。"
+    try:
+        page = max(int(filters.get("page") or 1), 1)
+        page_size = max(int(filters.get("page_size") or 50), 1)
+        total_incidents = max(int(filters.get("total_incidents") or total), total)
+    except (TypeError, ValueError):
+        page, page_size, total_incidents = 1, 50, total
+    total_pages = max(1, (total_incidents + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    page_params = {
+        key: value for key, value in filters.items()
+        if key not in {"page", "page_size", "total_incidents"} and value
+    }
+    pagination = (
+        '<nav class="review-pagination" aria-label="复核分页">'
+        + (f'<a href="/review?{escape(urlencode({**page_params, "page": page - 1}), quote=True)}">上一页</a>' if page > 1 else '<span>上一页</span>')
+        + f'<span>第 {page} / {total_pages} 页 · 共 {total_incidents} 个事件</span>'
+        + (f'<a href="/review?{escape(urlencode({**page_params, "page": page + 1}), quote=True)}">下一页</a>' if page < total_pages else '<span>下一页</span>')
+        + '</nav>'
+    ) if total_incidents else ""
     body = (
         f'<section class="incident-list" aria-label="复核事件列表">{rows}</section>'
         if rows
         else (
-            '<section class="empty-state"><h2>暂无待复核事件</h2>'
-            '<p>当前范围内没有红色或黄色事件。新的高风险事件出现后会显示在这里。</p></section>'
+            f'<section class="empty-state"><h2>{escape(empty)}</h2><p>请调整筛选条件，或等待新的公开信息进入系统。</p></section>'
         )
     )
     return (
@@ -255,6 +296,8 @@ def render_review_page(
         '--radius:12px}*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);'
         'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.5}.page{max-width:1120px;margin:0 auto;padding:32px 20px 56px}'
         '.workspace-nav{display:flex;gap:6px;width:max-content;margin-bottom:26px;padding:5px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}.workspace-nav a,.logout-button{padding:8px 13px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-weight:700;text-decoration:none;cursor:pointer}.workspace-nav a[aria-current="page"]{background:var(--accent);color:#fff}.logout-form{margin:0}'
+        '.review-tabs{display:flex;gap:8px;margin:0 0 18px}.review-tabs a{padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--muted);font-size:.88rem;font-weight:700;text-decoration:none}.review-tabs a[aria-current="page"]{border-color:var(--accent);background:var(--soft);color:var(--accent-strong)}'
+        '.review-pagination{display:flex;justify-content:center;gap:9px;align-items:center;margin:18px 0;color:var(--muted);font-size:.84rem}.review-pagination a,.review-pagination span{padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:var(--surface);text-decoration:none}.review-pagination span{color:var(--muted)}'
         '.page-header{padding:8px 0 24px}.eyebrow{margin:0 0 7px;color:var(--accent);font-size:.78rem;font-weight:700;letter-spacing:.08em}'
         'h1,h2,p{margin-top:0}h1{margin-bottom:8px;font-size:clamp(1.75rem,4vw,2.35rem);letter-spacing:-.03em;line-height:1.15}'
         '.intro{max-width:760px;margin:0;color:var(--muted)}.overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:20px}'
@@ -280,15 +323,16 @@ def render_review_page(
         f'<a href="{escape(analysis_href, quote=True)}">分析看板</a>'
         f'<form class="logout-form" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{escape(csrf_token, quote=True)}"><button class="logout-button" type="submit">退出</button></form></nav>'
         '<header class="page-header"><p class="eyebrow">OCOOPA / 召回复核工作台</p>'
-        '<h1>先处理需要判断的事件</h1><p class="intro">红色和黄色事件按待办优先级排列。请先核对原始来源，再记录结论。</p></header>'
+        f'<h1>{escape(heading)}</h1><p class="intro">{escape(intro)}</p></header>'
+        f'<nav class="review-tabs" aria-label="复核视图"><a href="{escape(queue_href, quote=True)}"{queue_current}>待处置队列</a><a href="{escape(library_href, quote=True)}"{library_current}>全量证据库</a></nav>'
         '<section class="overview" aria-label="本页风险概览">'
-        f'<div class="metric"><b>{total}</b><span>本页红黄事件</span></div>'
+        f'<div class="metric"><b>{total}</b><span>{"本页待处置事件" if view == "queue" else "本页证据事件"}</span></div>'
         f'<div class="metric metric--risk"><b>{red_count}</b><span>红色风险</span></div>'
         f'<div class="metric metric--attention"><b>{human_count}</b><span>需人工核实</span></div>'
         f'<div class="metric"><b>{pending_count}</b><span>待处理</span></div></section>'
         f'{filter_form}'
-        '<p class="review-guidance"><strong>操作影响：</strong>确认并跟进会结束当前待处理升级，但保留后续同事件告警；标记误报会永久抑制；静音 7 天为临时抑制。每次操作均需再次确认。</p>'
-        f'{body}</main><script>(()=>{{const openTarget=()=>{{if(!location.hash.startsWith("#mention-"))return;const target=document.getElementById(decodeURIComponent(location.hash.slice(1)));if(!target)return;let parent=target.parentElement;while(parent){{if(parent.tagName==="DETAILS")parent.open=true;parent=parent.parentElement}}target.scrollIntoView({{block:"center"}})}};window.addEventListener("hashchange",openTarget);openTarget()}})();</script></body></html>'
+        '<p class="review-guidance"><strong>操作影响：</strong>确认并跟进会结束当前待处理升级，但保留后续同事件告警；标记误报会永久抑制，并立即从看板、趋势与日报中排除，但仍保留在证据库；静音 7 天为临时抑制。系统不发布或回复任何平台内容。</p>'
+        f'{body}{pagination}</main><script>(()=>{{const openTarget=()=>{{if(!location.hash.startsWith("#mention-"))return;const target=document.getElementById(decodeURIComponent(location.hash.slice(1)));if(!target)return;let parent=target.parentElement;while(parent){{if(parent.tagName==="DETAILS")parent.open=true;parent=parent.parentElement}}target.scrollIntoView({{block:"center"}})}};window.addEventListener("hashchange",openTarget);openTarget()}})();</script></body></html>'
     )
 
 

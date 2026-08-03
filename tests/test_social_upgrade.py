@@ -122,10 +122,7 @@ class SocialUpgradeTests(unittest.TestCase):
         self.assertEqual(sum(cluster["link_count"] for cluster in detail["items"]), 5)
         self.assertEqual(normalize_detail_metric("invalid"), "links")
         detail_html = render_analysis_details(
-            detail,
-            7,
-            filters={"platform": "x", "campaign": "recall_26_659"},
-            csrf_token="csrf-value",
+            detail, 7, filters={"platform": "x", "campaign": "recall_26_659"}, csrf_token="csrf-value"
         )
         self.assertIn('<details class="cluster-card">', detail_html)
         self.assertIn("查看原文证据", detail_html)
@@ -133,14 +130,75 @@ class SocialUpgradeTests(unittest.TestCase):
         self.assertIn("平台：x", detail_html)
         self.assertIn('name="csrf" value="csrf-value"', detail_html)
         self.assertNotIn("story:recall-26-659", detail_html)
-
-        paged = build_detail_view(rows, metric="links", page=2, page_size=20)
-        # Page size is bounded to at least 20, so this small fixture remains on one page.
-        self.assertEqual(paged["page"], 1)
+        self.assertEqual(build_detail_view(rows, metric="links", page=2, page_size=20)["page"], 1)
 
         stats["filters"] = {"platform": "x", "campaign": "recall_26_659"}
         filtered_dashboard = render_dashboard(stats, 7)
         self.assertIn("/review/analysis/details?metric=links&amp;days=7&amp;platform=x&amp;campaign=recall_26_659", filtered_dashboard.replace("&", "&amp;"))
+
+    def test_false_positive_is_retained_for_audit_but_excluded_from_dashboard(self):
+        when = datetime(2026, 8, 1, 2, tzinfo=timezone.utc)
+        rows = [
+            {
+                "title": "OCOOPA recall 26-659 news repost", "raw_text": "OCOOPA recall 26-659",
+                "source_url": "https://news.example.com/recall", "event_fingerprint": "valid",
+                "source_name": "news", "platform": "web", "content_type": "article",
+                "fetched_at": when, "first_seen_at": when, "risk_level": "yellow",
+                "sentiment": "neutral", "campaign": "recall_26_659", "review_status": "confirmed",
+            },
+            {
+                "title": "Unrelated Ozark Trail stove lawsuit", "raw_text": "Unrelated camping stove lawsuit",
+                "source_url": "https://aboutlawsuits.example/ozark", "event_fingerprint": "false",
+                "source_name": "aboutlawsuits", "platform": "web", "content_type": "article",
+                "fetched_at": when, "first_seen_at": when, "risk_level": "red",
+                "sentiment": "negative", "campaign": "brand_major_risk", "review_status": "false_positive",
+                "incident_status": "resolved",
+            },
+        ]
+        stats = compute_dashboard(rows, [], 7, now=datetime(2026, 8, 1, 8, tzinfo=timezone.utc))
+        self.assertEqual(stats["valid_mentions"], 1)
+        self.assertEqual(stats["excluded_false_positives"], 1)
+        self.assertEqual(stats["risk"].get("red", 0), 0)
+        csv_text = rows_to_csv(rows)
+        self.assertIn("statistical_inclusion", csv_text.splitlines()[0])
+        self.assertIn("已排除误报", csv_text)
+
+    def test_news_repost_defaults_to_monitoring_and_parent_post_to_manual_comment_review(self):
+        from ocoopa_monitor.interventions import intervention_status, requires_human_intervention
+        from ocoopa_monitor.review_web import render_review_page
+
+        news = {"platform": "web", "content_type": "article", "recommended_action": "monitor"}
+        parent = {
+            "platform": "facebook", "content_type": "post", "recommended_action": "monitor",
+            "source_url": "https://facebook.com/outlet/posts/1",
+        }
+        self.assertEqual(intervention_status(news), "仅监测")
+        self.assertFalse(requires_human_intervention(news))
+        self.assertEqual(intervention_status(parent), "人工查看评论")
+        self.assertTrue(requires_human_intervention(parent))
+        html = render_review_page([], filters={"view": "library", "quality": "all"})
+        self.assertIn("全量证据库", html)
+        self.assertIn("待处置队列", html)
+        self.assertIn("已排除误报", html)
+
+    def test_intervention_route_is_persisted_separately_from_response_record(self):
+        with tempfile.NamedTemporaryFile() as tmp:
+            db = Database(tmp.name)
+            db.init()
+            mention = self._mention("https://facebook.com/outlet/posts/2", "OCOOPA recall article")
+            mention.platform, mention.content_type = "facebook", "post"
+            db.upsert_mention(mention)
+            db.ensure_mention_action(mention.id, {})
+            self.assertTrue(
+                db.update_mention_intervention(
+                    mention.id, "人工查看评论", "无需回应", "", "人工打开母帖查看评论", "reviewer"
+                )
+            )
+            rows = db.fetch_mentions_between(
+                datetime(2020, 1, 1, tzinfo=timezone.utc), datetime(2030, 1, 1, tzinfo=timezone.utc)
+            )
+            self.assertEqual(rows[0]["intervention_status"], "人工查看评论")
+            self.assertEqual(rows[0]["response_status"], "无需回应")
 
     def test_analysis_details_paginate_and_reject_unsafe_evidence_urls(self):
         when = datetime(2026, 8, 1, 2, tzinfo=timezone.utc)
