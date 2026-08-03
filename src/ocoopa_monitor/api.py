@@ -25,6 +25,7 @@ from .review_web import apply_mark, render_result, render_review_page, token_ok
 from .session_auth import COOKIE_NAME, CSRF_COOKIE_NAME, issue_session, new_csrf_token, verify_csrf, verify_session
 from .source_health import SourceHealthMonitor
 from .sources import sources_for_settings
+from .topics import enrich_topic_fields
 
 
 if FastAPI is not None:
@@ -251,6 +252,7 @@ if FastAPI is not None:
         days: int = 30,
         platform: str = "",
         campaign: str = "",
+        topic: str = "",
         authorization: str = Header(default=""),
     ) -> HTMLResponse:
         if token and settings.allow_query_token and token_ok(settings.review_token, token):
@@ -263,6 +265,7 @@ if FastAPI is not None:
             dict(row) for row in db.fetch_mentions_between(start, end)
             if (not platform or row.get("platform") == platform)
             and (not campaign or row.get("campaign") == campaign)
+            and (not topic or enrich_topic_fields(dict(row)).get("topic_primary") == topic)
         ]
         stats = compute_dashboard(
             rows,
@@ -272,7 +275,7 @@ if FastAPI is not None:
             now=end,
             source_health=db.list_source_health(),
         )
-        stats["filters"] = {"platform": platform, "campaign": campaign}
+        stats["filters"] = {"platform": platform, "campaign": campaign, "topic": topic}
         return HTMLResponse(
             render_dashboard(stats, days, "", request.cookies.get(CSRF_COOKIE_NAME, ""))
         )
@@ -301,6 +304,7 @@ if FastAPI is not None:
         days: int = 30,
         platform: str = "",
         campaign: str = "",
+        topic: str = "",
         page: int = 1,
         authorization: str = Header(default=""),
     ) -> HTMLResponse:
@@ -315,6 +319,7 @@ if FastAPI is not None:
                         "days": days,
                         "platform": platform,
                         "campaign": campaign,
+                        "topic": topic,
                         "page": page,
                     }.items() if value not in (None, "")
                 }
@@ -327,13 +332,14 @@ if FastAPI is not None:
             dict(row) for row in db.fetch_mentions_between(start, end)
             if (not platform or row.get("platform") == platform)
             and (not campaign or row.get("campaign") == campaign)
+            and (not topic or enrich_topic_fields(dict(row)).get("topic_primary") == topic)
         ]
         view = build_detail_view(rows, metric=metric, page=page)
         return HTMLResponse(
             render_analysis_details(
                 view,
                 days,
-                filters={"platform": platform, "campaign": campaign},
+                filters={"platform": platform, "campaign": campaign, "topic": topic},
                 csrf_token=request.cookies.get(CSRF_COOKIE_NAME, ""),
             )
         )
