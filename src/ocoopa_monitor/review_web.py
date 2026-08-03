@@ -3,12 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from html import escape
 import hmac
+import json
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from .db import MENTION_ACTION_STATUSES, REVIEW_STATUSES, str_to_dt
 from .interventions import INTERVENTION_STATUSES, intervention_status
 from .models import utcnow
+from .operational import has_pending_evidence_review
 from .syndication import with_syndication_fields
 
 # Review operates on INCIDENTS (event_fingerprint), not on alerts: every
@@ -42,6 +44,35 @@ def _safe_source_url(value: Any) -> str:
     return url if urlsplit(url).scheme in {"http", "https"} else ""
 
 
+def safe_return_to(value: Any) -> str:
+    """Allow only known internal workbench pages as a post-action return URL."""
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 2000:
+        return ""
+    parts = urlsplit(raw)
+    if parts.scheme or parts.netloc or parts.path not in {
+        "/review", "/review/analysis", "/review/analysis/details", "/dashboard",
+    }:
+        return ""
+    return urlunsplit(("", "", parts.path, parts.query, parts.fragment))
+
+
+def _with_anchor(return_to: str, anchor: str) -> str:
+    safe = safe_return_to(return_to)
+    if not safe:
+        return ""
+    parts = urlsplit(safe)
+    return urlunsplit(("", "", parts.path, parts.query, anchor))
+
+
+def _action_return_to(return_to: str, anchor: str) -> str:
+    """Keep an external workbench view intact; only anchor review-list returns."""
+    safe = safe_return_to(return_to)
+    if not safe:
+        return ""
+    return _with_anchor(safe, anchor) if urlsplit(safe).path == "/review" else safe
+
+
 def _status_meta(value: Any) -> Tuple[str, str]:
     return _STATUS_META.get(str(value or ""), ("状态待核", "unknown"))
 
@@ -72,7 +103,9 @@ def _incident_priority_key(incident: Dict[str, Any]) -> Tuple[int, int, int]:
     )
 
 
-def _action_forms(incident_id: int, token: str, compact: bool, csrf_token: str = "") -> str:
+def _action_forms(
+    incident_id: int, token: str, compact: bool, csrf_token: str = "", return_to: str = ""
+) -> str:
     forms: List[str] = []
     for status, label, days, warning in _ACTIONS:
         confirmation = escape(f"确定要{label}吗？{warning}", quote=True)
@@ -83,7 +116,7 @@ def _action_forms(incident_id: int, token: str, compact: bool, csrf_token: str =
             f'onsubmit="return confirm(\'{confirmation}\')">'
             f'<input type="hidden" name="incident_id" value="{incident_id}">'
             f'<input type="hidden" name="status" value="{escape(status, quote=True)}">'
-            f'{hidden_days}<input type="hidden" name="csrf" value="{escape(csrf_token, quote=True)}">'
+            f'{hidden_days}<input type="hidden" name="return_to" value="{escape(return_to, quote=True)}"><input type="hidden" name="csrf" value="{escape(csrf_token, quote=True)}">'
             f'<button class="{button_class}" type="submit">{escape(label)}</button></form>'
         )
     actions = "".join(forms)
@@ -95,7 +128,7 @@ def _action_forms(incident_id: int, token: str, compact: bool, csrf_token: str =
     return f'<div class="review-actions" aria-label="复核操作">{actions}</div>'
 
 
-def _render_mention(row: Dict[str, Any], csrf_token: str) -> str:
+def _render_mention(row: Dict[str, Any], csrf_token: str, return_to: str = "") -> str:
     row = with_syndication_fields(row)
     source_url = _safe_source_url(row.get("source_url"))
     parent_url = _safe_source_url(row.get("parent_url"))
@@ -142,6 +175,7 @@ def _render_mention(row: Dict[str, Any], csrf_token: str) -> str:
         '<form method="post" action="/review/mention-action" class="mention-action-form">'
         f'<input type="hidden" name="csrf" value="{escape(csrf_token, quote=True)}">'
         f'<input type="hidden" name="mention_id" value="{int(row.get("id") or 0)}">'
+        f'<input type="hidden" name="return_to" value="{escape(return_to, quote=True)}">'
         f'<label>人工分流<select name="intervention_status">{intervention_options}</select></label>'
         f'<label>对外回应登记<select name="response_status">{response_options}</select><small>当前：{escape(response_label)}</small></label>'
         f'<label>回应链接<input name="response_url" type="url" value="{escape(str(row.get("response_url") or ""), quote=True)}" placeholder="https://"></label>'
@@ -151,7 +185,9 @@ def _render_mention(row: Dict[str, Any], csrf_token: str) -> str:
     )
 
 
-def _render_incident(incident: Dict[str, Any], token: str, csrf_token: str = "") -> str:
+def _render_incident(
+    incident: Dict[str, Any], token: str, csrf_token: str = "", return_to: str = ""
+) -> str:
     risk = str(incident.get("risk_level_max") or "yellow")
     risk_label = "红色风险" if risk == "red" else "黄色风险"
     status_label, status_class = _status_meta(incident.get("status"))
@@ -170,27 +206,50 @@ def _render_incident(incident: Dict[str, Any], token: str, csrf_token: str = "")
         if source_url
         else '<span class="source-link source-link--unavailable">原始来源链接不可用</span>'
     )
-    human_review = (
-        '<span class="flag flag--review">需人工核实</span>' if incident.get("needs_human_review") else ""
+    human_closed = status_class in {"monitoring", "resolved"} or (
+        str(incident.get("status") or "") == "muted" and _mute_is_active(incident)
     )
-    evidence = (
-        '<span class="flag flag--verified">证据已校验</span>'
-        if incident.get("evidence_check_passed")
-        else '<span class="flag flag--review">证据待复核</span>'
-    )
+    human_review = ""
+    evidence = ""
+    audit_note = ""
+    if human_closed:
+        evidence_state = "证据已校验" if incident.get("evidence_check_passed") else "证据待复核"
+        review_state = "；自动初检曾提示需人工核实" if incident.get("needs_human_review") else ""
+        audit_note = (
+            '<details class="audit-note"><summary>查看自动初检留档</summary>'
+            f'<p>{escape(evidence_state + review_state)}。人工结论已优先用于当前处置，不再作为待办标签。</p></details>'
+        )
+    else:
+        human_review = (
+            '<span class="flag flag--review">需人工核实</span>' if incident.get("needs_human_review") else ""
+        )
+        evidence = (
+            '<span class="flag flag--verified">证据已校验</span>'
+            if incident.get("evidence_check_passed")
+            else '<span class="flag flag--review">证据待复核</span>'
+        )
     muted_note = ""
     if str(incident.get("status") or "") == "muted" and incident.get("muted_until"):
         mute_prefix = "静音至" if _mute_is_active(incident) else "静音已于"
         muted_note = f'<span class="muted-note">{mute_prefix} {escape(str(incident["muted_until"]))}</span>'
-    actions = _action_forms(int(incident["incident_id"]), token, compact=handled, csrf_token=csrf_token)
+    incident_return = _action_return_to(return_to, f"incident-{int(incident['incident_id'])}") or return_to
+    actions = _action_forms(
+        int(incident["incident_id"]), token, compact=handled, csrf_token=csrf_token, return_to=incident_return
+    )
     mentions = incident.get("mentions") or []
-    mention_html = "".join(_render_mention(dict(row), csrf_token) for row in mentions)
+    mention_html = "".join(
+        _render_mention(
+            dict(row), csrf_token,
+            _action_return_to(return_to, f"mention-{int(row.get('id') or 0)}") or return_to,
+        )
+        for row in mentions
+    )
     evidence_list = (
         f'<details class="mention-list"><summary>展开全部独立帖子 / 评论（{len(mentions)}）</summary>{mention_html}</details>'
         if mentions else ""
     )
     return (
-        f'<article class="incident incident--{risk}" aria-label="{risk_label}：{title}">'
+        f'<article class="incident incident--{risk}" id="incident-{int(incident["incident_id"])}" aria-label="{risk_label}：{title}">'
         '<div class="incident-header">'
         f'<label class="bulk-choice"><input class="bulk-select" form="bulk-action-form" type="checkbox" name="incident_id" value="{int(incident["incident_id"])}"><span class="sr-only">选择事件：{title}</span></label>'
         f'<span class="risk-badge risk-badge--{risk}">{risk_label}</span>'
@@ -199,6 +258,7 @@ def _render_incident(incident: Dict[str, Any], token: str, csrf_token: str = "")
         '</div>'
         f'<h2>{title}</h2>'
         f'<p class="incident-summary">{summary}</p>'
+        f'{audit_note}'
         '<dl class="incident-meta">'
         f'<div><dt>传播</dt><dd>{mention_count} 条提及，{source_count} 个来源</dd></div>'
         f'<div><dt>最后出现</dt><dd><time>{last_seen}</time></dd></div>'
@@ -210,13 +270,14 @@ def _render_incident(incident: Dict[str, Any], token: str, csrf_token: str = "")
     )
 
 
-def _bulk_action_form(csrf_token: str, total: int) -> str:
+def _bulk_action_form(csrf_token: str, total: int, return_to: str = "") -> str:
     if not total:
         return ""
     return (
         '<form id="bulk-action-form" method="post" action="/review/mark-bulk" class="bulk-actions" '
         'onsubmit="return confirmBulkAction(this)">'
         f'<input type="hidden" name="csrf" value="{escape(csrf_token, quote=True)}">'
+        f'<input type="hidden" name="return_to" value="{escape(return_to, quote=True)}">'
         '<label class="bulk-select-all"><input id="bulk-select-all" type="checkbox"> 全选本页</label>'
         '<span id="bulk-selection-count" aria-live="polite">已选 0 项</span>'
         '<span class="bulk-divider" aria-hidden="true"></span>'
@@ -230,7 +291,7 @@ def _bulk_action_form(csrf_token: str, total: int) -> str:
 
 def render_review_page(
     incidents: List[Dict[str, Any]], token: str = "", csrf_token: str = "",
-    filters: Optional[Dict[str, str]] = None,
+    filters: Optional[Dict[str, str]] = None, return_to: str = "",
 ) -> str:
     # Preserve newest-first order inside each operational priority band.
     ordered = sorted(incidents, key=lambda it: str(it.get("last_seen_at") or ""), reverse=True)
@@ -238,7 +299,17 @@ def render_review_page(
     view = str((filters or {}).get("view") or "queue")
     total = len(ordered)
     red_count = sum(it.get("risk_level_max") == "red" for it in ordered)
-    human_count = sum(bool(it.get("needs_human_review")) for it in ordered)
+    human_count = sum(
+        has_pending_evidence_review(
+            {
+                **it,
+                "incident_status": it.get("status"),
+                "incident_muted_until": it.get("muted_until"),
+            },
+            utcnow(),
+        )
+        for it in ordered
+    )
     pending_count = sum(
         str(it.get("status") or "active") == "active"
         or (str(it.get("status") or "") == "muted" and not _mute_is_active(it))
@@ -247,7 +318,8 @@ def render_review_page(
     review_href = "/review"
     analysis_params: Dict[str, Any] = {"days": 30}
     analysis_href = "/review/analysis?" + urlencode(analysis_params)
-    rows = "".join(_render_incident(incident, token, csrf_token) for incident in ordered)
+    return_to = safe_return_to(return_to)
+    rows = "".join(_render_incident(incident, token, csrf_token, return_to) for incident in ordered)
     filters = filters or {}
     intervention_options = "".join(
         f'<option value="{escape(value, quote=True)}"'
@@ -303,7 +375,7 @@ def render_review_page(
             f'<section class="empty-state"><h2>{escape(empty)}</h2><p>请调整筛选条件，或等待新的公开信息进入系统。</p></section>'
         )
     )
-    bulk_actions = _bulk_action_form(csrf_token, total)
+    bulk_actions = _bulk_action_form(csrf_token, total, return_to)
     return (
         '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -335,6 +407,7 @@ def render_review_page(
         '.review-actions{display:flex;flex-wrap:wrap;gap:8px}.review-action-form{margin:0}.review-action{min-height:36px;padding:7px 11px;border:1px solid #b8c5d3;border-radius:8px;background:var(--surface);color:var(--ink);font:inherit;font-size:.88rem;font-weight:700;cursor:pointer}'
         '.review-action--primary{border-color:var(--accent);background:var(--accent);color:#fff}.review-action:hover{border-color:var(--accent)}.review-action--primary:hover{background:var(--accent-strong)}.review-action:active{transform:translateY(1px)}'
         '.review-action:focus-visible,.source-link:focus-visible,summary:focus-visible{outline:3px solid #7dd3fc;outline-offset:2px}.review-correction{margin-top:3px}.review-correction summary{color:var(--muted);font-size:.88rem;cursor:pointer}.review-correction .review-actions{margin-top:11px}'
+        '.audit-note{margin:0 0 14px;padding:9px 11px;border-left:3px solid #9aa8b8;background:#f7f9fb;color:var(--muted);font-size:.82rem}.audit-note summary{cursor:pointer;font-weight:700}.audit-note p{margin:7px 0 0}'
         '.empty-state{padding:38px 24px;border:1px dashed #aab8c9;border-radius:var(--radius);background:var(--surface);text-align:center}.empty-state h2{font-size:1.2rem}.empty-state p{margin-bottom:0;color:var(--muted)}'
         '.filters{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end;margin:0 0 18px;padding:14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}.filters label,.mention-action-form label{display:grid;gap:5px;color:var(--muted);font-size:.78rem;font-weight:700}.filters input,.filters select,.mention-action-form input,.mention-action-form select,.mention-action-form textarea{width:100%;padding:8px;border:1px solid #b8c5d3;border-radius:7px;background:var(--surface);color:var(--ink);font:inherit}.filters button,.mention-action-form button{min-height:38px;padding:8px 12px;border:0;border-radius:8px;background:var(--accent);color:#fff;font-weight:700}.mention-list{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}.mention-list>summary,.guidance>summary{cursor:pointer;font-weight:700}.mention-card{margin-top:12px;padding:15px;border:1px solid var(--line);border-radius:10px;background:var(--canvas)}.mention-card:target{border-color:var(--accent);box-shadow:0 0 0 3px var(--soft)}.mention-card header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;color:var(--muted);font-size:.78rem}.mention-card h3{margin:9px 0 6px;font-size:1rem}.story-role{padding:2px 7px;border-radius:999px;background:var(--soft);color:var(--accent-strong);font-weight:700}.story-role--substantive_update{background:var(--red-soft);color:var(--red)}.response-state{margin-left:auto}.mention-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.mention-meta dt{color:var(--muted);font-size:.72rem;font-weight:700}.mention-meta dd{margin:2px 0;font-size:.82rem;overflow-wrap:anywhere}.guidance{margin:10px 0;padding:10px;border-left:3px solid var(--accent);background:var(--surface)}.guidance p{margin:8px 0;font-size:.86rem}.risk-note{color:var(--red)}.mention-action-form{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;align-items:end}.mention-action-form .wide{grid-column:1/-1}.mention-action-form button{justify-self:start}'
         '@media (max-width:720px){.page{padding:24px 14px 40px}.workspace-nav{width:100%}.workspace-nav a{flex:1;text-align:center}.overview{grid-template-columns:repeat(2,minmax(0,1fr))}.incident{padding:16px}.incident-meta,.mention-meta,.filters,.mention-action-form{grid-template-columns:1fr;gap:9px}.mention-action-form .wide{grid-column:auto}.review-action{width:100%}.review-action-form{flex:1 1 100%}.bulk-actions{align-items:stretch}.bulk-actions button{flex:1 1 100%}.bulk-divider{display:none}}'
@@ -408,8 +481,9 @@ def apply_bulk_mark(
     return True, f"已对 {len(unique_ids)} 个事件执行 {status}"
 
 
-def render_result(ok: bool, message: str, token: str = "") -> str:
-    back = "/review" + (f"?{urlencode({'token': token})}" if token else "")
+def render_result(ok: bool, message: str, token: str = "", return_to: str = "") -> str:
+    back = safe_return_to(return_to) or ("/review" + (f"?{urlencode({'token': token})}" if token else ""))
+    script_back = json.dumps(back).replace("</", "<\\/")
     result_class = "result--success" if ok else "result--error"
     title = "复核结论已记录" if ok else "未能记录复核结论"
     return (
@@ -417,6 +491,7 @@ def render_result(ok: bool, message: str, token: str = "") -> str:
         '<meta name="viewport" content="width=device-width, initial-scale=1"><title>OCOOPA 舆情复核</title>'
         '<style>body{margin:0;padding:24px;background:#f4f7fb;color:#14213a;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.result{max-width:620px;margin:8vh auto;padding:28px;border:1px solid #d9e1eb;border-radius:12px;background:#fff;box-shadow:0 12px 32px rgba(15,35,60,.08)}.result--success{border-left:5px solid #1f6b49}.result--error{border-left:5px solid #b42318}h1{margin-top:0;font-size:1.45rem}p{line-height:1.6}a{color:#075985;font-weight:700;text-underline-offset:3px}@media (prefers-color-scheme:dark){body{background:#111a29;color:#eff6ff}.result{border-color:#34455e;background:#172235}a{color:#7dd3fc}}</style>'
         '</head><body><main class="result ' + result_class + '"><h1>' + title + '</h1>'
-        f'<p aria-live="polite">{escape(message)}</p><p><a href="{escape(back, quote=True)}">返回复核列表</a></p>'
-        '</main></body></html>'
+        f'<p aria-live="polite">{escape(message)}</p><p><a href="{escape(back, quote=True)}">返回原页面</a></p>'
+        + (f'<script>setTimeout(()=>location.replace({script_back}),1200)</script>' if ok else '')
+        + '</main></body></html>'
     )

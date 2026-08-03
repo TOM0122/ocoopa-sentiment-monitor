@@ -157,11 +157,11 @@ def render_analysis_details(
     )
     if view["item_kind"] == "cluster":
         content = "".join(
-            _render_cluster(cluster, days, filters, token) for cluster in view["items"]
+            _render_cluster(cluster, days, filters, token, metric, int(view["page"])) for cluster in view["items"]
         )
     else:
         content = '<div class="evidence-list">' + "".join(
-            _render_mention(row, days, filters, token) for row in view["items"]
+            _render_mention(row, days, filters, token, metric, int(view["page"])) for row in view["items"]
         ) + "</div>"
     if not view["items"]:
         content = '<section class="empty-state"><h2>当前筛选范围暂无记录</h2><p>这只表示系统在当前时间、平台和主题范围内未发现对应内容。</p></section>'
@@ -246,7 +246,7 @@ def render_analysis_details(
 
 
 def _render_cluster(
-    cluster: Dict[str, Any], days: int, filters: Dict[str, str], token: str
+    cluster: Dict[str, Any], days: int, filters: Dict[str, str], token: str, metric: str, page: int
 ) -> str:
     role_text = "、".join(
         f"{ROLE_LABELS.get(role, role)} {count}"
@@ -262,7 +262,9 @@ def _render_cluster(
             f'<span class="tag">{len(cluster["platforms"])} 个平台</span>',
         ]
     )
-    members = "".join(_render_mention(row, days, filters, token) for row in cluster["members"])
+    members = "".join(
+        _render_mention(row, days, filters, token, metric, page) for row in cluster["members"]
+    )
     return (
         '<details class="cluster-card"><summary><div><div class="evidence-meta">'
         f'<span>{escape(str(cluster["cluster_label"]))}</span></div>'
@@ -306,19 +308,25 @@ def _render_detail_tab(
 
 
 def _render_mention(
-    row: Dict[str, Any], days: int, filters: Dict[str, str], token: str
+    row: Dict[str, Any], days: int, filters: Dict[str, str], token: str, metric: str, page: int
 ) -> str:
     risk = str(row.get("risk_level") or "unknown")
     source_url = _safe_url(row.get("source_url"))
     row_platform = str(row.get("platform") or "web")
     row_campaign = str(row.get("campaign") or filters.get("campaign") or "")
+    mention_id = int(row.get("id") or 0)
+    return_to = _detail_return_to(metric, days, filters, page, mention_id)
     review_href = "/review" + _q(
         token,
         limit=200,
         days=days,
         platform=row_platform,
         campaign=row_campaign,
-    ) + (f'#mention-{int(row["id"])}' if row.get("id") else "")
+        view="library",
+        quality="all",
+        focus_mention_id=mention_id or None,
+        return_to=return_to,
+    ) + (f'#mention-{mention_id}' if mention_id else "")
     original = (
         f'<a href="{escape(source_url, quote=True)}" target="_blank" rel="noopener noreferrer">查看原文证据 ↗</a>'
         if source_url else '<span class="tag">原文链接不可用</span>'
@@ -333,7 +341,7 @@ def _render_mention(
         if row.get(key) is not None
     )
     return (
-        f'<article class="evidence-row" id="detail-mention-{int(row.get("id") or 0)}"><div class="evidence-meta">'
+        f'<article class="evidence-row" id="detail-mention-{mention_id}"><div class="evidence-meta">'
         f'<span class="tag tag--{escape(risk, quote=True)}">{escape(_risk_label(risk))}</span>'
         f'<span class="tag">{escape(str(row.get("story_role_label") or "独立讨论"))}</span>'
         f'<span class="tag">{escape(str(row.get("topic_primary_label") or "其他讨论"))}</span>'
@@ -351,6 +359,22 @@ def _render_mention(
         + manual_comment_review
         + f'<a href="{escape(review_href, quote=True)}">进入复核页</a></div></article>'
     )
+
+
+def _detail_return_to(
+    metric: str, days: int, filters: Dict[str, str], page: int, mention_id: int
+) -> str:
+    params = {
+        "metric": metric,
+        "days": days,
+        "platform": filters.get("platform"),
+        "campaign": filters.get("campaign"),
+        "topic": filters.get("topic"),
+        "page": page,
+    }
+    query = urlencode({key: value for key, value in params.items() if value not in (None, "")})
+    target = "/review/analysis/details" + ("?" + query if query else "")
+    return target + (f"#detail-mention-{mention_id}" if mention_id else "")
 
 
 def _render_pagination(

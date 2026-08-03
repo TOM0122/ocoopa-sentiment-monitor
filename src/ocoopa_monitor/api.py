@@ -21,7 +21,14 @@ from .pipeline import MonitorPipeline
 from .reports import DailyReportService
 from .outbox import DeliveryOutboxWorker
 from .delivery import DeliveryClient
-from .review_web import apply_bulk_mark, apply_mark, render_result, render_review_page, token_ok
+from .review_web import (
+    apply_bulk_mark,
+    apply_mark,
+    render_result,
+    render_review_page,
+    safe_return_to,
+    token_ok,
+)
 from .session_auth import COOKIE_NAME, CSRF_COOKIE_NAME, issue_session, new_csrf_token, verify_csrf, verify_session
 from .source_health import SourceHealthMonitor
 from .sources import sources_for_settings
@@ -85,6 +92,14 @@ if FastAPI is not None:
         if response_class is HTMLResponse:
             return HTMLResponse('<p>会话已失效，请<a href="/auth/login">重新登录</a>。</p>', status_code=401)
         return Response("unauthorized", status_code=401)
+
+    def _current_review_return(request: Request) -> str:
+        """Return to the current list state without nesting arbitrary redirects."""
+        params = [
+            (key, value) for key, value in request.query_params.multi_items()
+            if key != "return_to"
+        ]
+        return "/review" + ("?" + urlencode(params) if params else "")
 
     @app.get("/auth/login", response_class=HTMLResponse)
     def login_page() -> HTMLResponse:
@@ -173,6 +188,8 @@ if FastAPI is not None:
         view: str = "queue",
         page: int = 1,
         days: int = 30,
+        focus_mention_id: int = 0,
+        return_to: str = "",
         authorization: str = Header(default=""),
     ) -> HTMLResponse:
         if token and settings.allow_query_token and token_ok(settings.review_token, token):
@@ -193,7 +210,12 @@ if FastAPI is not None:
                 or (datetime.fromisoformat(str(incident["last_seen_at"]).replace("Z", "+00:00")).astimezone(timezone.utc) >= start_at)
             )
         ]
-        if platform or campaign or response_status or intervention or quality != "all":
+        if focus_mention_id > 0:
+            incidents = [
+                incident for incident in incidents
+                if any(int(row.get("id") or 0) == focus_mention_id for row in incident.get("mentions", []))
+            ]
+        elif platform or campaign or response_status or intervention or quality != "all":
             for incident in incidents:
                 incident["mentions"] = [
                     row for row in incident.get("mentions", [])
@@ -221,15 +243,18 @@ if FastAPI is not None:
                     "platform": platform, "campaign": campaign, "risk": risk,
                     "response_status": response_status, "intervention": intervention,
                     "quality": quality, "view": view, "days": str(days),
+                    "focus_mention_id": str(focus_mention_id) if focus_mention_id > 0 else "",
                     "page": str(page), "page_size": str(page_size),
                     "total_incidents": str(total_incidents),
                 },
+                return_to=safe_return_to(return_to) or _current_review_return(request),
             )
         )
 
     @app.post("/review/mark", response_class=HTMLResponse)
     async def review_mark(request: Request) -> HTMLResponse:
         form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+        return_to = form.get("return_to", [""])[0]
         if not _page_authorized(request) or not _csrf_authorized(request, form.get("csrf", [""])[0]):
             return _unauthorized(HTMLResponse)
         try:
@@ -238,13 +263,14 @@ if FastAPI is not None:
             raw_days = form.get("days", [""])[0]
             days = int(raw_days) if raw_days else None
         except (TypeError, ValueError):
-            return HTMLResponse(render_result(False, "复核参数无效"), status_code=400)
+            return HTMLResponse(render_result(False, "复核参数无效", return_to=return_to), status_code=400)
         ok, message = apply_mark(db, incident_id, status, days)
-        return HTMLResponse(render_result(ok, message, ""), status_code=200 if ok else 400)
+        return HTMLResponse(render_result(ok, message, return_to=return_to), status_code=200 if ok else 400)
 
     @app.post("/review/mention-action", response_class=HTMLResponse)
     async def review_mention_action(request: Request) -> HTMLResponse:
         form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+        return_to = form.get("return_to", [""])[0]
         if not _page_authorized(request) or not _csrf_authorized(request, form.get("csrf", [""])[0]):
             return _unauthorized(HTMLResponse)
         try:
@@ -258,12 +284,13 @@ if FastAPI is not None:
                 form.get("operator", [""])[0],
             )
         except (TypeError, ValueError) as exc:
-            return HTMLResponse(render_result(False, str(exc)), status_code=400)
-        return HTMLResponse(render_result(ok, "逐条处置记录已更新" if ok else "未找到该舆情记录"), status_code=200 if ok else 404)
+            return HTMLResponse(render_result(False, str(exc), return_to=return_to), status_code=400)
+        return HTMLResponse(render_result(ok, "逐条处置记录已更新" if ok else "未找到该舆情记录", return_to=return_to), status_code=200 if ok else 404)
 
     @app.post("/review/mark-bulk", response_class=HTMLResponse)
     async def review_mark_bulk(request: Request) -> HTMLResponse:
         form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+        return_to = form.get("return_to", [""])[0]
         if not _page_authorized(request) or not _csrf_authorized(request, form.get("csrf", [""])[0]):
             return _unauthorized(HTMLResponse)
         try:
@@ -272,9 +299,9 @@ if FastAPI is not None:
             raw_days = form.get("days", [""])[0]
             days = int(raw_days) if raw_days else None
         except (TypeError, ValueError):
-            return HTMLResponse(render_result(False, "批量复核参数无效"), status_code=400)
+            return HTMLResponse(render_result(False, "批量复核参数无效", return_to=return_to), status_code=400)
         ok, message = apply_bulk_mark(db, incident_ids, status, days)
-        return HTMLResponse(render_result(ok, message, ""), status_code=200 if ok else 400)
+        return HTMLResponse(render_result(ok, message, return_to=return_to), status_code=200 if ok else 400)
 
     def _window(days: int, timezone_name: str = "Asia/Shanghai"):
         end = utcnow()

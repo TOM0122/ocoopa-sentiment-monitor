@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from .syndication import ROLE_LABELS, with_syndication_fields
 from .topics import TOPIC_LABELS, enrich_topic_fields, is_public_social_parent_post
 from .interventions import intervention_status, requires_human_intervention
-from .operational import is_excluded_false_positive, operational_rows
+from .operational import has_pending_evidence_review, is_excluded_false_positive, operational_rows
 
 
 _SENTIMENT_LABELS = {
@@ -385,7 +385,7 @@ def compute_dashboard(
         "new_mentions": sum(not bool(row.get("backfill")) for row in data),
         "monitored_mentions": sum(not bool(row.get("backfill")) for row in data),
         "backfill_mentions": sum(bool(row.get("backfill")) for row in data),
-        "review_needed": sum(bool(row.get("needs_human_review")) for row in data),
+        "review_needed": sum(has_pending_evidence_review(row, current) for row in data),
         "risk": dict(risk),
         "sentiment": dict(sentiment),
         "source": dict(sources),
@@ -591,7 +591,7 @@ def _render_top_risks(rows: Sequence[Dict[str, Any]]) -> str:
             if source_url
             else '<span>原文链接不可用</span>'
         )
-        review = '<span class="mini-tag">需人工核实</span>' if row.get("needs_human_review") else ""
+        review = '<span class="mini-tag">需人工核实</span>' if has_pending_evidence_review(row) else ""
         cards.append(
             f'<article class="risk-item risk-item--{risk}"><div class="risk-item__meta">'
             f'<span class="risk-label risk-label--{risk}">{"红色" if risk == "red" else "黄色"}</span>{review}'

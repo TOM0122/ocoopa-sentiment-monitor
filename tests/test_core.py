@@ -964,6 +964,59 @@ class CoreTests(unittest.TestCase):
         self.assertIn("原始来源链接不可用", html)
         self.assertNotIn("javascript:alert", html)
 
+    def test_review_web_human_conclusion_closes_automatic_evidence_todo_and_returns_safely(self):
+        from ocoopa_monitor.review_web import render_result, render_review_page, safe_return_to
+
+        html = render_review_page(
+            [{
+                "incident_id": 8,
+                "risk_level_max": "red",
+                "status": "monitoring",
+                "needs_human_review": True,
+                "evidence_check_passed": False,
+                "title": "Human-reviewed event",
+                "summary_zh": "人工已完成确认",
+                "mention_count": 1,
+                "source_count": 1,
+                "last_seen_at": "2026-08-03T09:00:00Z",
+                "mentions": [{"id": 88, "title": "evidence", "platform": "web"}],
+            }],
+            csrf_token="csrf-token",
+            return_to="/review/analysis/details?metric=links&days=30#detail-mention-88",
+        )
+        self.assertIn("已确认跟进", html)
+        self.assertIn("查看自动初检留档", html)
+        self.assertNotIn('<span class="flag flag--review">需人工核实</span>', html)
+        self.assertNotIn('<span class="flag flag--review">证据待复核</span>', html)
+        self.assertIn('name="return_to" value="/review/analysis/details?metric=links&amp;days=30#detail-mention-88"', html)
+        self.assertEqual(safe_return_to("https://attacker.example/review"), "")
+        result = render_result(True, "已记录", return_to="/review/analysis/details?metric=links#detail-mention-88")
+        self.assertIn("返回原页面", result)
+        self.assertIn('location.replace("/review/analysis/details?metric=links#detail-mention-88")', result)
+        xss_safe_result = render_result(True, "已记录", return_to="/review?note=</script><script>alert(1)</script>")
+        self.assertNotIn("</script><script>alert(1)</script>", xss_safe_result)
+        self.assertIn("<\\/script>", xss_safe_result)
+
+    def test_dashboard_review_count_excludes_human_closed_evidence_flags(self):
+        from ocoopa_monitor.analysis_web import compute_dashboard
+
+        when = datetime(2026, 8, 3, 1, tzinfo=timezone.utc)
+        stats = compute_dashboard([
+            {
+                "title": "Reviewed source", "raw_text": "OCOOPA recall 26-659", "source_url": "https://example.com/1",
+                "event_fingerprint": "reviewed", "source_name": "news", "platform": "web", "content_type": "article",
+                "fetched_at": when, "first_seen_at": when, "risk_level": "red", "campaign": "recall_26_659",
+                "needs_human_review": True, "evidence_check_passed": False, "incident_status": "monitoring",
+            },
+            {
+                "title": "Open source", "raw_text": "OCOOPA recall 26-659", "source_url": "https://example.com/2",
+                "event_fingerprint": "open", "source_name": "news", "platform": "web", "content_type": "article",
+                "fetched_at": when, "first_seen_at": when, "risk_level": "red", "campaign": "recall_26_659",
+                "needs_human_review": True, "evidence_check_passed": False, "incident_status": "active",
+            },
+        ], [], 7, now=datetime(2026, 8, 3, 8, tzinfo=timezone.utc))
+        self.assertEqual(stats["review_needed"], 1)
+
     def test_backfilled_red_incident_is_reviewable_without_alert(self):
         from ocoopa_monitor.review_web import apply_mark
 
