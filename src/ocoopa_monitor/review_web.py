@@ -192,6 +192,7 @@ def _render_incident(incident: Dict[str, Any], token: str, csrf_token: str = "")
     return (
         f'<article class="incident incident--{risk}" aria-label="{risk_label}：{title}">'
         '<div class="incident-header">'
+        f'<label class="bulk-choice"><input class="bulk-select" form="bulk-action-form" type="checkbox" name="incident_id" value="{int(incident["incident_id"])}"><span class="sr-only">选择事件：{title}</span></label>'
         f'<span class="risk-badge risk-badge--{risk}">{risk_label}</span>'
         f'<span class="status-badge status-badge--{status_class}">{status_label}</span>'
         f'{human_review}{evidence}{muted_note}'
@@ -206,6 +207,24 @@ def _render_incident(incident: Dict[str, Any], token: str, csrf_token: str = "")
         f'{actions}'
         f'{evidence_list}'
         '</article>'
+    )
+
+
+def _bulk_action_form(csrf_token: str, total: int) -> str:
+    if not total:
+        return ""
+    return (
+        '<form id="bulk-action-form" method="post" action="/review/mark-bulk" class="bulk-actions" '
+        'onsubmit="return confirmBulkAction(this)">'
+        f'<input type="hidden" name="csrf" value="{escape(csrf_token, quote=True)}">'
+        '<label class="bulk-select-all"><input id="bulk-select-all" type="checkbox"> 全选本页</label>'
+        '<span id="bulk-selection-count" aria-live="polite">已选 0 项</span>'
+        '<span class="bulk-divider" aria-hidden="true"></span>'
+        '<button type="submit" name="status" value="confirmed">批量确认并跟进</button>'
+        '<button type="submit" name="status" value="false_positive" class="bulk-danger">批量标记误报</button>'
+        '<input type="hidden" name="days" value="7">'
+        '<button type="submit" name="status" value="muted">批量静音 7 天</button>'
+        '</form>'
     )
 
 
@@ -284,6 +303,7 @@ def render_review_page(
             f'<section class="empty-state"><h2>{escape(empty)}</h2><p>请调整筛选条件，或等待新的公开信息进入系统。</p></section>'
         )
     )
+    bulk_actions = _bulk_action_form(csrf_token, total)
     return (
         '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -298,6 +318,7 @@ def render_review_page(
         '.workspace-nav{display:flex;gap:6px;width:max-content;margin-bottom:26px;padding:5px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}.workspace-nav a,.logout-button{padding:8px 13px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-weight:700;text-decoration:none;cursor:pointer}.workspace-nav a[aria-current="page"]{background:var(--accent);color:#fff}.logout-form{margin:0}'
         '.review-tabs{display:flex;gap:8px;margin:0 0 18px}.review-tabs a{padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--muted);font-size:.88rem;font-weight:700;text-decoration:none}.review-tabs a[aria-current="page"]{border-color:var(--accent);background:var(--soft);color:var(--accent-strong)}'
         '.review-pagination{display:flex;justify-content:center;gap:9px;align-items:center;margin:18px 0;color:var(--muted);font-size:.84rem}.review-pagination a,.review-pagination span{padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:var(--surface);text-decoration:none}.review-pagination span{color:var(--muted)}'
+        '.bulk-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 18px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:0 2px 8px rgba(15,35,60,.035)}.bulk-actions button{min-height:35px;padding:7px 10px;border:1px solid #b8c5d3;border-radius:8px;background:var(--surface);color:var(--ink);font:inherit;font-size:.84rem;font-weight:700;cursor:pointer}.bulk-actions button:first-of-type{border-color:var(--accent);background:var(--accent);color:#fff}.bulk-actions .bulk-danger{border-color:#e6aaa4;color:var(--red)}.bulk-select-all,.bulk-choice{display:inline-flex;align-items:center;gap:6px;font-size:.84rem;font-weight:700;cursor:pointer}.bulk-choice{margin-right:1px}.bulk-choice input,.bulk-select-all input{width:17px;height:17px;accent-color:var(--accent);cursor:pointer}.bulk-divider{width:1px;height:24px;background:var(--line)}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}'
         '.page-header{padding:8px 0 24px}.eyebrow{margin:0 0 7px;color:var(--accent);font-size:.78rem;font-weight:700;letter-spacing:.08em}'
         'h1,h2,p{margin-top:0}h1{margin-bottom:8px;font-size:clamp(1.75rem,4vw,2.35rem);letter-spacing:-.03em;line-height:1.15}'
         '.intro{max-width:760px;margin:0;color:var(--muted)}.overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:20px}'
@@ -316,7 +337,7 @@ def render_review_page(
         '.review-action:focus-visible,.source-link:focus-visible,summary:focus-visible{outline:3px solid #7dd3fc;outline-offset:2px}.review-correction{margin-top:3px}.review-correction summary{color:var(--muted);font-size:.88rem;cursor:pointer}.review-correction .review-actions{margin-top:11px}'
         '.empty-state{padding:38px 24px;border:1px dashed #aab8c9;border-radius:var(--radius);background:var(--surface);text-align:center}.empty-state h2{font-size:1.2rem}.empty-state p{margin-bottom:0;color:var(--muted)}'
         '.filters{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end;margin:0 0 18px;padding:14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}.filters label,.mention-action-form label{display:grid;gap:5px;color:var(--muted);font-size:.78rem;font-weight:700}.filters input,.filters select,.mention-action-form input,.mention-action-form select,.mention-action-form textarea{width:100%;padding:8px;border:1px solid #b8c5d3;border-radius:7px;background:var(--surface);color:var(--ink);font:inherit}.filters button,.mention-action-form button{min-height:38px;padding:8px 12px;border:0;border-radius:8px;background:var(--accent);color:#fff;font-weight:700}.mention-list{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}.mention-list>summary,.guidance>summary{cursor:pointer;font-weight:700}.mention-card{margin-top:12px;padding:15px;border:1px solid var(--line);border-radius:10px;background:var(--canvas)}.mention-card:target{border-color:var(--accent);box-shadow:0 0 0 3px var(--soft)}.mention-card header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;color:var(--muted);font-size:.78rem}.mention-card h3{margin:9px 0 6px;font-size:1rem}.story-role{padding:2px 7px;border-radius:999px;background:var(--soft);color:var(--accent-strong);font-weight:700}.story-role--substantive_update{background:var(--red-soft);color:var(--red)}.response-state{margin-left:auto}.mention-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.mention-meta dt{color:var(--muted);font-size:.72rem;font-weight:700}.mention-meta dd{margin:2px 0;font-size:.82rem;overflow-wrap:anywhere}.guidance{margin:10px 0;padding:10px;border-left:3px solid var(--accent);background:var(--surface)}.guidance p{margin:8px 0;font-size:.86rem}.risk-note{color:var(--red)}.mention-action-form{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;align-items:end}.mention-action-form .wide{grid-column:1/-1}.mention-action-form button{justify-self:start}'
-        '@media (max-width:720px){.page{padding:24px 14px 40px}.workspace-nav{width:100%}.workspace-nav a{flex:1;text-align:center}.overview{grid-template-columns:repeat(2,minmax(0,1fr))}.incident{padding:16px}.incident-meta,.mention-meta,.filters,.mention-action-form{grid-template-columns:1fr;gap:9px}.mention-action-form .wide{grid-column:auto}.review-action{width:100%}.review-action-form{flex:1 1 100%}}'
+        '@media (max-width:720px){.page{padding:24px 14px 40px}.workspace-nav{width:100%}.workspace-nav a{flex:1;text-align:center}.overview{grid-template-columns:repeat(2,minmax(0,1fr))}.incident{padding:16px}.incident-meta,.mention-meta,.filters,.mention-action-form{grid-template-columns:1fr;gap:9px}.mention-action-form .wide{grid-column:auto}.review-action{width:100%}.review-action-form{flex:1 1 100%}.bulk-actions{align-items:stretch}.bulk-actions button{flex:1 1 100%}.bulk-divider{display:none}}'
         '@media (prefers-color-scheme:dark){:root{--canvas:#111a29;--surface:#172235;--ink:#eff6ff;--muted:#b1c0d3;--line:#34455e;--accent:#7dd3fc;--accent-strong:#bae6fd;--soft:#12324a;--shadow:0 12px 32px rgba(0,0,0,.2);--red:#ffb4ac;--red-soft:#482523;--amber:#ffd68a;--amber-soft:#423313;--green:#a4e2c0;--green-soft:#173a2b}.workspace-nav a[aria-current="page"]{background:#7dd3fc;color:#082f49}.intro,.incident-summary{color:var(--muted)}.review-guidance{color:#c8eafa}.source-link{color:var(--accent)}.review-action{background:#172235;color:var(--ink);border-color:#52657c}.review-action--primary{background:#7dd3fc;border-color:#7dd3fc;color:#082f49}.review-action--primary:hover{background:#bae6fd}}'
         '</style></head><body><main class="page"><nav class="workspace-nav" aria-label="舆情工作台">'
         f'<a href="{escape(review_href, quote=True)}" aria-current="page">事件复核</a>'
@@ -332,7 +353,7 @@ def render_review_page(
         f'<div class="metric"><b>{pending_count}</b><span>待处理</span></div></section>'
         f'{filter_form}'
         '<p class="review-guidance"><strong>操作影响：</strong>确认并跟进会结束当前待处理升级，但保留后续同事件告警；标记误报会永久抑制，并立即从看板、趋势与日报中排除，但仍保留在证据库；静音 7 天为临时抑制。系统不发布或回复任何平台内容。</p>'
-        f'{body}{pagination}</main><script>(()=>{{const openTarget=()=>{{if(!location.hash.startsWith("#mention-"))return;const target=document.getElementById(decodeURIComponent(location.hash.slice(1)));if(!target)return;let parent=target.parentElement;while(parent){{if(parent.tagName==="DETAILS")parent.open=true;parent=parent.parentElement}}target.scrollIntoView({{block:"center"}})}};window.addEventListener("hashchange",openTarget);openTarget()}})();</script></body></html>'
+        f'{bulk_actions}{body}{pagination}</main><script>(()=>{{const selected=()=>[...document.querySelectorAll(".bulk-select:checked")];const count=document.getElementById("bulk-selection-count");const all=document.getElementById("bulk-select-all");const sync=()=>{{const items=document.querySelectorAll(".bulk-select");if(count)count.textContent=`已选 ${{selected().length}} 项`;if(all){{all.checked=items.length>0&&selected().length===items.length;all.indeterminate=selected().length>0&&selected().length<items.length}}}};document.querySelectorAll(".bulk-select").forEach(item=>item.addEventListener("change",sync));if(all)all.addEventListener("change",()=>{{document.querySelectorAll(".bulk-select").forEach(item=>item.checked=all.checked);sync()}});window.confirmBulkAction=form=>{{const chosen=selected().length;if(!chosen){{alert("请先选择至少一个事件。");return false}}const button=form.querySelector("button[type=submit]:focus");const action=button?button.textContent:"批量操作";return confirm(`确定要对 ${{chosen}} 个事件执行“${{action}}”吗？此操作会分别记录到每个事件。`)}};sync();const openTarget=()=>{{if(!location.hash.startsWith("#mention-"))return;const target=document.getElementById(decodeURIComponent(location.hash.slice(1)));if(!target)return;let parent=target.parentElement;while(parent){{if(parent.tagName==="DETAILS")parent.open=true;parent=parent.parentElement}}target.scrollIntoView({{block:"center"}})}};window.addEventListener("hashchange",openTarget);openTarget()}})();</script></body></html>'
     )
 
 
@@ -356,6 +377,35 @@ def apply_mark(
         return False, "未找到对应事件"
     db.ack_alerts_by_fingerprint(fingerprint)  # also stops escalation for any alert on this event
     return True, f"事件 #{incident_id} 已标记为 {status}"
+
+
+def apply_bulk_mark(
+    db,
+    incident_ids: List[int],
+    status: str,
+    days: Optional[int] = None,
+    now: Optional[datetime] = None,
+) -> Tuple[bool, str]:
+    """Apply one reviewed event action to a bounded, explicit selection.
+
+    All IDs are resolved before any record changes, preventing a malformed
+    selection from producing a partly-applied bulk decision.
+    """
+    if status not in REVIEW_STATUSES:
+        return False, f"无效状态：{status}"
+    unique_ids = list(dict.fromkeys(incident_ids))
+    if not unique_ids:
+        return False, "请至少选择一个事件"
+    if len(unique_ids) > 100:
+        return False, "单次最多可处理 100 个事件"
+    missing = [incident_id for incident_id in unique_ids if not db.get_fingerprint_by_incident(incident_id)]
+    if missing:
+        return False, f"未找到事件：{', '.join(str(value) for value in missing[:5])}"
+    for incident_id in unique_ids:
+        ok, _ = apply_mark(db, incident_id, status, days, now)
+        if not ok:  # Defensive: validation above normally makes this unreachable.
+            return False, f"事件 #{incident_id} 未能完成批量处置"
+    return True, f"已对 {len(unique_ids)} 个事件执行 {status}"
 
 
 def render_result(ok: bool, message: str, token: str = "") -> str:
