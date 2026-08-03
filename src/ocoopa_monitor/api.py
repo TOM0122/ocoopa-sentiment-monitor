@@ -293,6 +293,27 @@ if FastAPI is not None:
             return HTMLResponse(render_result(False, str(exc), return_to=return_to), status_code=400)
         return HTMLResponse(render_result(ok, "逐条处置记录已更新" if ok else "未找到该舆情记录", return_to=return_to), status_code=200 if ok else 404)
 
+    @app.post("/review/public-social-intake", response_class=HTMLResponse)
+    async def public_social_intake(request: Request) -> HTMLResponse:
+        """Store a user-supplied public parent-post link without scraping it."""
+        form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+        return_to = form.get("return_to", [""])[0]
+        if not _page_authorized(request) or not _csrf_authorized(request, form.get("csrf", [""])[0]):
+            return _unauthorized(HTMLResponse)
+        try:
+            stored = MonitorPipeline(db, settings).ingest_manual_public_social(
+                form.get("source_url", [""])[0],
+                form.get("title", [""])[0],
+                form.get("evidence_excerpt", [""])[0],
+            )
+        except ValueError as exc:
+            return HTMLResponse(render_result(False, str(exc), return_to=return_to), status_code=400)
+        message = (
+            f"公开社媒母帖已补录（记录 #{stored.id}）；仅保留公开链接与已提供证据，"
+            "未抓取平台正文或评论，也不会重复发送钉钉提醒。"
+        )
+        return HTMLResponse(render_result(True, message, return_to=return_to))
+
     @app.post("/review/mark-bulk", response_class=HTMLResponse)
     async def review_mark_bulk(request: Request) -> HTMLResponse:
         form = parse_qs((await request.body()).decode("utf-8", errors="replace"))

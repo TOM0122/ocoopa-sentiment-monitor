@@ -31,6 +31,7 @@ from .social import (
     response_guidance,
 )
 from .syndication import assess_syndication
+from .public_social_intake import build_manual_public_social_item
 from .normalize import (
     canonicalize_url,
     content_hash,
@@ -115,6 +116,12 @@ class MonitorPipeline:
             "deliveries_failed": 0,
         }
         for source in self.db.get_sources(lane):
+            if not self._source_due(source, backfill):
+                stats.setdefault("sources_deferred", 0)
+                stats["sources_deferred"] += 1
+                continue
+            source_backfill = backfill or self._source_requires_silent_backfill(source)
+            source_realtime_enabled = realtime_enabled and not source_backfill
             stats["sources_attempted"] += 1
             if source.priority == "P0":
                 stats["p0_sources_attempted"] += 1
@@ -134,7 +141,7 @@ class MonitorPipeline:
                     query_terms = list(keyword_terms)
                     if raw_item.source_name.startswith(("google_news", "serpapi", "gnews", "brave")):
                         query_terms.extend(self._source_query_terms(raw_item))
-                    mention = self._build_mention(raw_item, query_terms, backfill=backfill)
+                    mention = self._build_mention(raw_item, query_terms, backfill=source_backfill)
                     if since and mention.published_at and mention.published_at < since:
                         stats["items_filtered_since"] += 1
                         continue
@@ -164,7 +171,7 @@ class MonitorPipeline:
                         if previous_metrics
                         else None
                     )
-                    if surge_reason and realtime_enabled and stored.id is not None:
+                    if surge_reason and source_realtime_enabled and stored.id is not None:
                         surge_payload = self.delivery_client.alert_payload(
                             title=stored.title,
                             url=stored.source_url,
@@ -196,13 +203,13 @@ class MonitorPipeline:
                     if is_current_recall(stored.title, stored.raw_text):
                         self.db.upsert_recall_mention(stored.id)
                         stats["recall_mentions_registered"] += 1
-                    if self._is_red_escalation(analysis) and not realtime_enabled:
+                    if self._is_red_escalation(analysis) and not source_realtime_enabled:
                         stats["alerts_suppressed_pre_bootstrap"] += 1
                     # Every effective public mention enters the first-discovery
                     # ledger immediately, including routine recall reposts. The
                     # recall digest reads the same ledger and therefore skips
                     # these rows instead of sending a second notification.
-                    batch_candidate = assessment.valid and realtime_enabled and stored.is_new
+                    batch_candidate = assessment.valid and source_realtime_enabled and stored.is_new
                     incident_suppressed = self.db.is_incident_suppressed(stored.event_fingerprint)
                     if batch_candidate and incident_suppressed:
                         stats["alerts_suppressed_muted"] += 1
@@ -240,7 +247,7 @@ class MonitorPipeline:
                                 "_incident_group_id": incident_group_id,
                             }
                         )
-                    elif self._should_alert(stored, analysis, backfill, realtime_enabled):
+                    elif self._should_alert(stored, analysis, source_backfill, source_realtime_enabled):
                         if self.db.is_incident_suppressed(stored.event_fingerprint):
                             # Human marked this incident false-positive or muted.
                             stats["alerts_suppressed_muted"] += 1
@@ -251,6 +258,10 @@ class MonitorPipeline:
                         elif self._create_alert(stored, analysis, incident_group_id):
                             stats["alerts_created"] += 1
                 self.db.record_source_success(source)
+                if source.source_name == "brave_media_outlet_social":
+                    self.db.set_state("source_last_run:brave_media_outlet_social", utcnow().isoformat())
+                    if source_backfill:
+                        self.db.set_state("media_outlet_social_backfill_completed_at", utcnow().isoformat())
                 if source.method == "brandwatch":
                     self.db.set_state(f"source_cursor:{source.source_name}", utcnow().isoformat())
             except Exception as exc:
@@ -310,6 +321,51 @@ class MonitorPipeline:
         stats["deliveries_sent"] = delivery_stats["sent"]
         stats["deliveries_failed"] = delivery_stats["failed"]
         return stats
+
+    def ingest_manual_public_social(
+        self, source_url: str, title: str = "", evidence_excerpt: str = ""
+    ) -> Mention:
+        """Silently preserve an operator-supplied public parent-post link.
+
+        The person providing the link already knows about it, so this is an
+        evidence-library backfill, never an automatic DingTalk notification.
+        """
+        raw_item, _ = build_manual_public_social_item(source_url, title, evidence_excerpt)
+        keyword_terms = [keyword.term for keyword in self.db.get_keywords("regular")]
+        mention = self._build_mention(raw_item, keyword_terms, backfill=True)
+        assessment = assess_public_mention(mention)
+        if not assessment.valid:
+            raise ValueError("补录内容未满足 OCOOPA 召回/安全舆情口径；请补充原帖可见标题或摘要")
+        stored = self.db.upsert_mention(mention)
+        self.db.record_interaction_snapshot(stored)
+        if not stored.is_new and not stored.is_updated:
+            return stored
+        analysis = enrich_analysis(stored, self.analysis_service.analyze(stored))
+        self.db.insert_analysis(analysis)
+        self.db.ensure_mention_action(stored.id, response_guidance(stored, analysis))
+        self.db.upsert_incident_group(stored, analysis)
+        if is_current_recall(stored.title, stored.raw_text):
+            self.db.upsert_recall_mention(stored.id)
+        return stored
+
+    def _source_due(self, source: SourceConfig, backfill: bool) -> bool:
+        if backfill or source.source_name != "brave_media_outlet_social":
+            return True
+        raw = self.db.get_state("source_last_run:brave_media_outlet_social")
+        if not raw:
+            return True
+        try:
+            last_run = _aware(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+        except ValueError:
+            return True
+        return last_run is None or utcnow() - last_run >= timedelta(hours=4)
+
+    def _source_requires_silent_backfill(self, source: SourceConfig) -> bool:
+        """New public-index sources must never replay indexed history as live."""
+        return (
+            source.source_name == "brave_media_outlet_social"
+            and not self.db.get_state("media_outlet_social_backfill_completed_at")
+        )
 
     def bootstrap(self, since_days: int) -> Dict[str, Dict[str, int]]:
         """Cold-start: silently backfill both lanes, then enable real-time alerts.
