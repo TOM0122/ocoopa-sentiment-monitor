@@ -986,6 +986,8 @@ class CoreTests(unittest.TestCase):
         )
         self.assertIn("已确认跟进", html)
         self.assertIn("查看自动初检留档", html)
+        self.assertIn('class="review-correction audit-note"', html)
+        self.assertNotIn("background:#f7f9fb", html)
         self.assertNotIn('<span class="flag flag--review">需人工核实</span>', html)
         self.assertNotIn('<span class="flag flag--review">证据待复核</span>', html)
         self.assertIn('name="return_to" value="/review/analysis/details?metric=links&amp;days=30#detail-mention-88"', html)
