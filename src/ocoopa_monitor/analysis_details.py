@@ -45,6 +45,10 @@ def normalize_detail_metric(metric: str) -> str:
     return metric if metric in DETAIL_METRICS else "links"
 
 
+def normalize_story_role(story_role: str) -> str:
+    return story_role if story_role in ROLE_LABELS else ""
+
+
 def build_detail_view(
     rows: Iterable[Any],
     metric: str = "links",
@@ -172,6 +176,12 @@ def render_analysis_details(
         f'>{escape(label)}</option>'
         for name, label in TOPIC_LABELS.items()
     )
+    story_role_options = "".join(
+        f'<option value="{escape(name, quote=True)}"'
+        f'{" selected" if filters.get("story_role") == name else ""}'
+        f'>{escape(label)}</option>'
+        for name, label in ROLE_LABELS.items()
+    )
     filter_form = (
         '<form class="detail-filters" method="get" action="/review/analysis/details">'
         f'<input type="hidden" name="metric" value="{escape(metric, quote=True)}">'
@@ -182,6 +192,9 @@ def render_analysis_details(
         f'<option value="brand_major_risk"{" selected" if filters.get("campaign") == "brand_major_risk" else ""}>品牌重大风险</option></select></label>'
         '<label>议题<select name="topic"><option value="">全部</option>'
         + topic_options
+        + '</select></label>'
+        '<label>传播角色<select name="story_role"><option value="">全部</option>'
+        + story_role_options
         + '</select></label>'
         '<button type="submit">应用筛选</button></form>'
     )
@@ -194,6 +207,8 @@ def render_analysis_details(
         )
     if filters.get("topic"):
         scope_parts.append(f"议题：{TOPIC_LABELS.get(filters['topic'], filters['topic'])}")
+    if filters.get("story_role"):
+        scope_parts.append(f"传播角色：{ROLE_LABELS.get(filters['story_role'], filters['story_role'])}")
     return (
         '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -298,6 +313,7 @@ def _render_detail_tab(
         platform=filters.get("platform"),
         campaign=filters.get("campaign"),
         topic=filters.get("topic"),
+        story_role=filters.get("story_role"),
     )
     return (
         f'<a class="detail-tab{(" detail-tab--active" if active else "")}" '
@@ -370,6 +386,7 @@ def _detail_return_to(
         "platform": filters.get("platform"),
         "campaign": filters.get("campaign"),
         "topic": filters.get("topic"),
+        "story_role": filters.get("story_role"),
         "page": page,
     }
     query = urlencode({key: value for key, value in params.items() if value not in (None, "")})
@@ -389,6 +406,7 @@ def _render_pagination(
         "platform": filters.get("platform"),
         "campaign": filters.get("campaign"),
         "topic": filters.get("topic"),
+        "story_role": filters.get("story_role"),
     }
     previous = (
         f'<a href="/review/analysis/details{_q(token, page=page - 1, **common)}">← 上一页</a>'

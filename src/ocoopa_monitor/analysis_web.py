@@ -299,14 +299,6 @@ def compute_dashboard(
         or sum(int(row.get(key) or 0) for key in ("like_count", "comment_count", "share_count")) >= 500
         for row in data
     )
-    top_spread = sorted(
-        data,
-        key=lambda row: (
-            int(row.get("view_count") or 0),
-            sum(int(row.get(key) or 0) for key in ("like_count", "comment_count", "share_count")),
-        ),
-        reverse=True,
-    )[:10]
     coverage = []
     for platform, count in sorted(platforms.items(), key=lambda item: (-item[1], item[0])):
         platform_rows = [row for row in data if str(row.get("platform") or "web") == platform]
@@ -404,7 +396,6 @@ def compute_dashboard(
         "coverage": coverage,
         "source_health": health_rows,
         "delivery_p95_seconds": delivery_p95,
-        "top_spread": top_spread,
         "platform_trends": platform_trends,
         "cross_platform_events": cross_platform_events,
         "category_ranked": category_ranked,
@@ -511,20 +502,6 @@ def _source_health_rows(rows: Sequence[Dict[str, Any]]) -> str:
         f'<td>{escape(str(row.get("last_attempt_at") or "尚未运行"))}</td>'
         f'<td>{int(row.get("consecutive_failures") or 0)}</td></tr>'
         for row in rows
-    )
-
-
-def _spread_rows(rows: Sequence[Dict[str, Any]]) -> str:
-    measured = [row for row in rows if any(row.get(key) is not None for key in ("view_count", "like_count", "comment_count", "share_count"))]
-    if not measured:
-        return '<tr><td colspan="6">当前来源未提供互动数据，不推断传播等级。</td></tr>'
-    return "".join(
-        f'<tr><td>{escape(str(row.get("platform") or "web"))}</td><td>{escape(str(row.get("title") or "未命名内容"))}</td>'
-        f'<td>{row.get("view_count") if row.get("view_count") is not None else "—"}</td>'
-        f'<td>{row.get("like_count") if row.get("like_count") is not None else "—"}</td>'
-        f'<td>{row.get("comment_count") if row.get("comment_count") is not None else "—"}</td>'
-        f'<td>{row.get("share_count") if row.get("share_count") is not None else "—"}</td></tr>'
-        for row in measured[:10]
     )
 
 
@@ -637,9 +614,20 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         stats.get("sentiment", {}), _SENTIMENT_LABELS, max(stats.get("total", 0), 1), 4
     )
     platform_rows = _distribution_rows(stats.get("platform", {}), {}, max(stats.get("total", 0), 1), 8)
-    response_rows = _distribution_rows(stats.get("response_status", {}), {}, max(stats.get("total", 0), 1), 6)
     story_role_rows = _distribution_rows(
-        stats.get("story_role", {}), ROLE_LABELS, max(stats.get("total", 0), 1), 6
+        stats.get("story_role", {}),
+        ROLE_LABELS,
+        max(stats.get("total", 0), 1),
+        6,
+        href_for=lambda story_role: "/review/analysis/details" + _q(
+            token,
+            metric="links",
+            days=days,
+            platform=filters.get("platform"),
+            campaign=filters.get("campaign"),
+            topic=filters.get("topic"),
+            story_role=story_role,
+        ),
     )
     daily_rows = "".join(
         f'<tr><td>{escape(item["date"])}</td><td>{item.get("published_total", 0)}</td><td>{item["total"]}</td>'
@@ -735,10 +723,8 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         + '</article></section>'
         '<section class="distribution-grid"><article class="panel"><h2>平台分布</h2><p class="panel-description">按公开内容所在平台归类。</p>'
         + platform_rows
-        + '</article><article class="panel"><h2>传播结构</h2><p class="panel-description">区分官方事实源、转载扩散和新增实质信号。</p>'
+        + '</article><article class="panel"><h2>传播结构</h2><p class="panel-description">区分官方事实源、转载扩散和新增实质信号；点击可查看原文证据。</p>'
         + story_role_rows
-        + '</article><article class="panel"><h2>回应状态</h2><p class="panel-description">逐条处置闭环。</p>'
-        + response_rows
         + '</article></section>'
         '<section class="panel keyword-panel"><div class="panel-head"><div><h2>高频关键词</h2><p class="panel-description">来自实际命中的监测词，已排除内部检索占位标记。</p></div></div><div class="keyword-wrap">'
         + keyword_html
@@ -746,11 +732,9 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         '<section class="panel"><div class="panel-head"><div><h2>近期重点风险</h2><p class="panel-description">最多显示 6 条，完整记录可通过检索或 CSV 查看。</p></div></div><div class="risk-grid">'
         + _render_top_risks(stats.get("top", []))
         + '</div></section>'
-        '<section class="grid"><article class="panel"><div class="panel-head"><div><h2>高传播帖子榜</h2><p class="panel-description">仅展示平台实际返回的互动数据；缺失时不估算。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>平台</th><th>内容</th><th>浏览</th><th>赞</th><th>评论</th><th>分享</th></tr></thead><tbody>'
-        + _spread_rows(stats.get("top_spread", []))
-        + '</tbody></table></div></article><aside class="panel"><div class="panel-head"><div><h2>各平台发现走线</h2><p class="panel-description">右列为最近 7 个自然日的发现量序列。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>平台</th><th>窗口总量</th><th>近 7 日</th></tr></thead><tbody>'
+        '<section class="panel"><div class="panel-head"><div><h2>各平台发现走线</h2><p class="panel-description">展示各平台窗口总量与最近 7 个自然日的发现量序列。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>平台</th><th>窗口总量</th><th>近 7 日</th></tr></thead><tbody>'
         + _platform_trend_rows(stats.get("platform_trends", []))
-        + '</tbody></table></div></aside></section>'
+        + '</tbody></table></div></section>'
         '<section class="panel"><div class="panel-head"><div><h2>跨平台扩散</h2><p class="panel-description">按传播簇归并，同一新闻稿的网站与社媒链接不再误认为多个独立事件。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>事件</th><th>平台数</th><th>平台</th></tr></thead><tbody>'
         + _cross_platform_rows(stats.get("cross_platform_events", []))
         + '</tbody></table></div></section>'
