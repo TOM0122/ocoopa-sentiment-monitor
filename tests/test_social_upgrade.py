@@ -19,6 +19,7 @@ from ocoopa_monitor.session_auth import issue_session, verify_csrf, verify_sessi
 from ocoopa_monitor.social import assess_public_mention, crossed_surge_threshold, infer_platform, response_guidance
 from ocoopa_monitor.sources import sources_for_settings
 from ocoopa_monitor.syndication import assess_syndication
+from ocoopa_monitor.topics import enrich_topic_fields
 
 
 def _settings(path: str, **overrides) -> Settings:
@@ -113,7 +114,10 @@ class SocialUpgradeTests(unittest.TestCase):
         self.assertIn("news_repost", exported)
 
         detail = build_detail_view(rows, metric="clusters", page=1, page_size=20)
-        self.assertEqual(detail["counts"], {"links": 5, "clusters": 2, "syndicated": 2, "substantive": 1})
+        self.assertEqual(
+            detail["counts"],
+            {"links": 5, "clusters": 2, "syndicated": 2, "substantive": 1, "parent_posts": 1},
+        )
         self.assertEqual(detail["item_kind"], "cluster")
         self.assertEqual(sum(cluster["link_count"] for cluster in detail["items"]), 5)
         self.assertEqual(normalize_detail_metric("invalid"), "links")
@@ -166,6 +170,40 @@ class SocialUpgradeTests(unittest.TestCase):
         self.assertIn("第 2 / 2 页", html)
         self.assertIn("← 上一页", html)
         self.assertNotIn("javascript:alert", html)
+
+    def test_parent_post_worklist_and_topic_axis_do_not_treat_recall_death_as_lawsuit(self):
+        recall_post = {
+            "id": 1,
+            "title": "Boston station reports OCOOPA recall after fires and one death",
+            "raw_text": "CPSC recall 26-659 reports fires, burns and one death. The station posted this update on Facebook.",
+            "source_url": "https://www.facebook.com/Boston25News/posts/123",
+            "event_fingerprint": "official-release",
+            "source_type": "search",
+            "source_name": "brave",
+            "platform": "facebook",
+            "content_type": "post",
+            "fetched_at": datetime(2026, 8, 2, tzinfo=timezone.utc),
+            "first_seen_at": datetime(2026, 8, 2, tzinfo=timezone.utc),
+            "risk_level": "red",
+            "campaign": "recall_26_659",
+        }
+        legal = enrich_topic_fields({
+            **recall_post,
+            "id": 2,
+            "title": "OCOOPA class action lawsuit filed",
+            "raw_text": "A class action lawsuit was filed over OCOOPA hand warmer fires.",
+            "source_url": "https://news.example.com/lawsuit",
+            "platform": "news",
+            "content_type": "article",
+        })
+        self.assertEqual(enrich_topic_fields(recall_post)["topic_primary"], "recall_regulatory")
+        self.assertEqual(legal["topic_primary"], "legal_action")
+        view = build_detail_view([recall_post, legal], metric="parent_posts")
+        self.assertEqual(view["total_items"], 1)
+        html = render_analysis_details(view, 7, filters={})
+        self.assertIn("人工查看评论", html)
+        self.assertIn("不抓取评论", html)
+        self.assertNotIn("Meta Developer", html)
 
     def test_signed_session_expiry_tamper_and_csrf(self):
         token = issue_session("independent", ttl_hours=1, now=100)

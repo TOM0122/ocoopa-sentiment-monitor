@@ -1112,7 +1112,7 @@ class CoreTests(unittest.TestCase):
         )
         html = render_dashboard(stats, 7, "t")
         self.assertIn("高频关键词", html)
-        self.assertIn("召回与监管", html)
+        self.assertIn("召回 / 监管传播", html)
         self.assertNotIn("javascript:alert", html)
 
     def test_repeat_fetch_does_not_move_daily_discovery_or_report_count(self):

@@ -83,11 +83,14 @@ class RiskRuleEngine:
     @staticmethod
     def _category(reasons: Iterable[str]) -> str:
         reason_set = set(reasons)
-        if {"lawsuit", "death_or_serious_injury"} & reason_set:
+        # A death/injury keyword is not itself a lawsuit or a compensation
+        # claim.  Keep the legacy category useful for downstream consumers;
+        # the dashboard adds a separate multi-axis topic view for overlap.
+        if "lawsuit" in reason_set:
             return "lawsuit"
         if "regulatory" in reason_set:
             return "recall"
-        if "safety" in reason_set:
+        if {"safety", "death_or_serious_injury"} & reason_set:
             return "user_complaint"
         if "review" in reason_set:
             return "kol_review"

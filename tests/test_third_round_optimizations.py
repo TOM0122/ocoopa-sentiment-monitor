@@ -90,6 +90,12 @@ class ThirdRoundOptimizationTests(unittest.TestCase):
         )
         self.assertTrue(result.passed)
 
+    def test_injury_or_death_without_legal_marker_is_not_legacy_lawsuit_category(self):
+        decision = RiskRuleEngine().evaluate(
+            "CPSC recall reports one death", "The OCOOPA recall was issued after fire and burn hazards.", ["OCOOPA 26-659"]
+        )
+        self.assertEqual(decision.category, "recall")
+
     def test_search_api_query_hit_does_not_inject_synthetic_brand_keyword(self):
         db, tmp = self.make_db()
         item = RawItem(

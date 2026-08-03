@@ -9,18 +9,8 @@ from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 from .syndication import ROLE_LABELS, with_syndication_fields
+from .topics import TOPIC_LABELS, enrich_topic_fields, is_public_social_parent_post
 
-
-_CATEGORY_LABELS = {
-    "lawsuit": "诉讼与索赔",
-    "recall": "召回与监管",
-    "media_report": "媒体报道",
-    "user_complaint": "用户投诉",
-    "promotion": "营销活动",
-    "kol_review": "KOL / 测评",
-    "other": "其他讨论",
-    "unknown": "未分类",
-}
 
 _SENTIMENT_LABELS = {
     "negative": "负面",
@@ -172,7 +162,7 @@ def _build_analysis(stats: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         recommendations.append("当前以转载扩散为主，向领导汇报时应同时展示传播链接数和独立传播簇数，避免将转载量误读为新事件。")
     if total and not stats["substantive_updates"]:
         recommendations.append("当前规则未识别到新增实质信号；继续抽查原文和社媒评论，不将自动结果作为无风险结论。")
-    if top_categories and top_categories[0][0] in {"lawsuit", "recall"}:
+    if top_categories and top_categories[0][0] in {"legal_action", "recall_regulatory"}:
         recommendations.append(
             f"当前首要议题为“{top_categories[0][1]}”，建议同步 PR、法务与客服准备事实清单和标准答复。"
         )
@@ -191,7 +181,7 @@ def compute_dashboard(
     now: Optional[datetime] = None,
     source_health: Iterable[Any] = (),
 ) -> Dict[str, Any]:
-    data = [with_syndication_fields(row) for row in _rows(rows)]
+    data = [enrich_topic_fields(with_syndication_fields(row)) for row in _rows(rows)]
     alert_rows = _rows(alerts)
     health_rows = _rows(source_health)
     days = min(max(int(window_days), 1), 366)
@@ -212,7 +202,7 @@ def compute_dashboard(
     risk = Counter(str(row.get("risk_level") or "unknown") for row in data)
     sentiment = Counter(str(row.get("sentiment") or "unknown") for row in data)
     sources = Counter(str(row.get("source_name") or "未知来源") for row in data)
-    categories = Counter(str(row.get("category") or "unknown") for row in data)
+    topics = Counter(str(row.get("topic_primary") or "other") for row in data)
     platforms = Counter(str(row.get("platform") or "web") for row in data)
     content_types = Counter(str(row.get("content_type") or "article") for row in data)
     campaigns = Counter(str(row.get("campaign") or "brand_major_risk") for row in data)
@@ -357,8 +347,8 @@ def compute_dashboard(
     )[:10]
     source_ranked = sorted(sources.items(), key=lambda item: (-item[1], item[0]))
     category_ranked = [
-        (name, _CATEGORY_LABELS.get(name, name), count)
-        for name, count in sorted(categories.items(), key=lambda item: (-item[1], item[0]))
+        (name, TOPIC_LABELS.get(name, name), count)
+        for name, count in sorted(topics.items(), key=lambda item: (-item[1], item[0]))
     ]
     stats: Dict[str, Any] = {
         "window_days": days,
@@ -367,6 +357,7 @@ def compute_dashboard(
         "total": total,
         "valid_mentions": total,
         "social_mentions": sum(str(row.get("platform") or "web") in social_platforms for row in data),
+        "public_social_parent_posts": sum(is_public_social_parent_post(row) for row in data),
         "urgent_mentions": sum(str(row.get("notification_priority") or "standard") == "urgent" for row in data),
         "pending_responses": sum(str(row.get("response_status") or "待判断") in {"待判断", "建议回应"} for row in data),
         "surge_mentions": surge_count,
@@ -388,7 +379,7 @@ def compute_dashboard(
         "source": dict(sources),
         "source_ranked": source_ranked,
         "source_concentration": (source_ranked[0][1] / total) if source_ranked and total else 0.0,
-        "category": dict(categories),
+        "category": dict(topics),
         "platform": dict(platforms),
         "content_type": dict(content_types),
         "campaign": dict(campaigns),
@@ -544,18 +535,32 @@ def _cross_platform_rows(rows: Sequence[Dict[str, Any]]) -> str:
     )
 
 
-def _distribution_rows(values: Dict[str, int], labels: Dict[str, str], total: int, limit: int = 7) -> str:
+def _distribution_rows(
+    values: Dict[str, int],
+    labels: Dict[str, str],
+    total: int,
+    limit: int = 7,
+    href_for=None,
+) -> str:
     ordered = sorted(values.items(), key=lambda item: (-item[1], item[0]))[:limit]
     if not ordered:
         return '<p class="empty-inline">暂无数据</p>'
     maximum = max(count for _, count in ordered) or 1
-    return "".join(
-        '<div class="distribution-row">'
-        f'<span>{escape(labels.get(name, name))}</span>'
-        f'<div class="distribution-bar"><i style="width:{count / maximum * 100:.1f}%"></i></div>'
-        f'<strong>{count}</strong><small>{count / total:.1%}</small></div>'
-        for name, count in ordered
-    )
+    rows = []
+    for name, count in ordered:
+        href = href_for(name) if href_for else ""
+        opening = (
+            f'<a class="distribution-row distribution-row--link" href="{escape(href, quote=True)}">'
+            if href else '<div class="distribution-row">'
+        )
+        closing = "</a>" if href else "</div>"
+        rows.append(
+            opening
+            + f'<span>{escape(labels.get(name, name))}</span>'
+            + f'<div class="distribution-bar"><i style="width:{count / maximum * 100:.1f}%"></i></div>'
+            + f'<strong>{count}</strong><small>{count / total:.1%}</small>{closing}'
+        )
+    return "".join(rows)
 
 
 def _render_top_risks(rows: Sequence[Dict[str, Any]]) -> str:
@@ -587,7 +592,7 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
     filters = stats.get("filters") or {}
     trend_class = str(stats.get("trend", {}).get("direction") or "flat")
     date_links = "".join(
-        f'<a href="/review/analysis{_q(token, days=value, platform=filters.get("platform"), campaign=filters.get("campaign"))}" '
+        f'<a href="/review/analysis{_q(token, days=value, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" '
         f'class="period-link{(" period-link--active" if value == days else "")}">{value} 天</a>'
         for value in (7, 14, 30, 90)
     )
@@ -602,7 +607,18 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
     category_labels = {name: label for name, label, _ in stats.get("category_ranked", [])}
     source_rows = _distribution_rows(stats.get("source", {}), {}, max(stats.get("total", 0), 1), 6)
     category_rows = _distribution_rows(
-        stats.get("category", {}), category_labels, max(stats.get("total", 0), 1), 6
+        stats.get("category", {}),
+        category_labels,
+        max(stats.get("total", 0), 1),
+        6,
+        href_for=lambda topic: "/review/analysis/details" + _q(
+            token,
+            metric="links",
+            days=days,
+            platform=filters.get("platform"),
+            campaign=filters.get("campaign"),
+            topic=topic,
+        ),
     )
     sentiment_rows = _distribution_rows(
         stats.get("sentiment", {}), _SENTIMENT_LABELS, max(stats.get("total", 0), 1), 4
@@ -625,6 +641,14 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         '<label>监测主题<select name="campaign"><option value="">全部</option>'
         f'<option value="recall_26_659"{" selected" if filters.get("campaign") == "recall_26_659" else ""}>召回 26-659</option>'
         f'<option value="brand_major_risk"{" selected" if filters.get("campaign") == "brand_major_risk" else ""}>品牌重大风险</option></select></label>'
+        '<label>议题<select name="topic"><option value="">全部</option>'
+        + "".join(
+            f'<option value="{escape(name, quote=True)}"'
+            f'{" selected" if filters.get("topic") == name else ""}'
+            f'>{escape(label)}</option>'
+            for name, label in TOPIC_LABELS.items()
+        )
+        + '</select></label>'
         '<button type="submit">应用筛选</button></form>'
     )
     return (
@@ -649,7 +673,7 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         '.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}.panel h2{margin-bottom:4px;font-size:1.08rem}.panel-description{margin:0;color:var(--muted);font-size:.86rem}.legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:.78rem}.legend i{display:inline-block;width:15px;height:3px;margin-right:5px;vertical-align:middle}.legend-published{background:#6d4db3}.legend-total{background:#075985}.legend-red{background:#b42318}.legend-yellow{background:#d69e2e}'
         '.trend-chart{display:block;width:100%;height:auto;min-height:240px}.chart-grid{stroke:var(--line);stroke-width:1}.chart-label{fill:var(--muted);font-size:11px}.chart-line{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.chart-line--total{stroke:#075985}.chart-line--published{stroke:#6d4db3;stroke-dasharray:7 5}.chart-line--red{stroke:#b42318}.chart-line--yellow{stroke:#d69e2e}'
         '.analysis-list,.recommendation-list{margin:0;padding-left:1.25rem}.analysis-list li,.recommendation-list li{margin:.65rem 0}.recommendation-list li::marker{color:var(--accent);font-weight:800}.recommendation-head{margin-top:22px}.keyword-panel{margin-bottom:16px}'
-        '.distribution-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:16px}.distribution-row{display:grid;grid-template-columns:minmax(72px,1fr) 1.5fr 32px 44px;gap:8px;align-items:center;margin:10px 0;font-size:.82rem}.distribution-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.distribution-row strong{text-align:right}.distribution-row small{color:var(--muted);text-align:right}.distribution-bar{height:7px;border-radius:999px;background:#e9eef4;overflow:hidden}.distribution-bar i{display:block;height:100%;border-radius:inherit;background:var(--accent)}'
+        '.distribution-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:16px}.distribution-row{display:grid;grid-template-columns:minmax(72px,1fr) 1.5fr 32px 44px;gap:8px;align-items:center;margin:10px 0;font-size:.82rem}.distribution-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.distribution-row strong{text-align:right}.distribution-row small{color:var(--muted);text-align:right}.distribution-row--link{color:inherit;text-decoration:none;border-radius:6px}.distribution-row--link:hover{background:var(--accent-soft)}.distribution-row--link:focus-visible{outline:3px solid #7dd3fc;outline-offset:2px}.distribution-bar{height:7px;border-radius:999px;background:#e9eef4;overflow:hidden}.distribution-bar i{display:block;height:100%;border-radius:inherit;background:var(--accent)}'
         '.keyword-wrap{display:flex;flex-wrap:wrap;gap:8px}.keyword-chip{padding:7px 9px;border:1px solid #bfd2df;border-radius:8px;background:var(--accent-soft);color:#19475f;font-size:.84rem}.keyword-chip b{margin-left:4px}.risk-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.risk-item{padding:14px;border:1px solid var(--line);border-left:4px solid var(--amber);border-radius:10px;background:var(--surface)}.risk-item--red{border-left-color:var(--red)}'
         '.risk-item__meta{display:flex;flex-wrap:wrap;gap:7px;align-items:center;color:var(--muted);font-size:.76rem}.risk-label,.mini-tag{padding:2px 6px;border-radius:999px;font-weight:800}.risk-label--red{color:#8a1c14;background:var(--red-soft)}.risk-label--yellow,.mini-tag{color:#775000;background:var(--amber-soft)}.risk-item h3{margin:9px 0 6px;font-size:.94rem}.risk-item p{margin-bottom:8px;color:var(--muted);font-size:.84rem}.risk-item footer a{color:var(--accent);font-size:.82rem;font-weight:800;text-underline-offset:3px}.risk-item footer span{color:var(--muted);font-size:.82rem}'
         '.daily-details{margin-top:12px}.daily-details summary{cursor:pointer;color:var(--accent);font-weight:800}.daily-table-wrap{overflow:auto;margin-top:12px}.daily-table{width:100%;border-collapse:collapse;font-size:.82rem}.daily-table th,.daily-table td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:right}.daily-table th:first-child,.daily-table td:first-child{text-align:left}.empty-inline{color:var(--muted)}'
@@ -661,7 +685,7 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         '<nav class="workspace-nav" aria-label="舆情工作台"><a href="/review'
         + _q(token)
         + '">事件复核</a><a href="/review/analysis'
-        + _q(token, days=days)
+        + _q(token, days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))
         + '" aria-current="page">分析看板</a><form class="logout-form" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="'
         + escape(csrf_token, quote=True)
         + '"><button class="logout-button" type="submit">退出</button></form></nav>'
@@ -671,11 +695,11 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         f'<a class="secondary-link" href="/console/export.csv{_q(token, days=days)}">导出 CSV</a></div></header>'
         + filter_form
         + '<section class="metrics" aria-label="舆情核心指标">'
-        f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="links", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"))}" aria-label="查看有效传播链接明细"><span>有效传播链接</span><strong>{stats.get("valid_mentions", 0)}</strong><small>全部有效公开记录 · 回溯 {stats.get("backfill_mentions", 0)}</small><small class="metric-link__action">查看明细 →</small></a>'
-        f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="clusters", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"))}" aria-label="查看自动归并的独立传播簇"><span>独立传播簇</span><strong>{stats.get("story_clusters", 0)}</strong><small class="trend-note trend-note--{trend_class}">{escape(str(stats.get("trend", {}).get("label") or "暂无趋势"))}</small><small class="metric-link__action">自动归并 · 查看明细 →</small></a>'
-        f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="syndicated", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"))}" aria-label="查看转载扩散链接"><span>转载扩散链接</span><strong>{stats.get("syndicated_mentions", 0)}</strong><small>社媒扩散 {stats.get("social_amplifications", 0)} 条</small><small class="metric-link__action">查看明细 →</small></a>'
-        f'<a class="metric metric-link metric--risk" href="/review/analysis/details{_q(token, metric="substantive", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"))}" aria-label="查看待复核的新增实质信号"><span>新增实质信号</span><strong>{stats.get("substantive_updates", 0)}</strong><small>待人工复核 · 紧急 {stats.get("urgent_mentions", 0)} · 传播突增 {stats.get("surge_mentions", 0)}</small><small class="metric-link__action">优先查看 →</small></a>'
-        f'<article class="metric"><span>社媒提及</span><strong>{stats.get("social_mentions", 0)}</strong><small>公开平台内容</small></article>'
+        f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="links", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看有效传播链接明细"><span>有效传播链接</span><strong>{stats.get("valid_mentions", 0)}</strong><small>全部有效公开记录 · 回溯 {stats.get("backfill_mentions", 0)}</small><small class="metric-link__action">查看明细 →</small></a>'
+        f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="clusters", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看自动归并的独立传播簇"><span>独立传播簇</span><strong>{stats.get("story_clusters", 0)}</strong><small class="trend-note trend-note--{trend_class}">{escape(str(stats.get("trend", {}).get("label") or "暂无趋势"))}</small><small class="metric-link__action">自动归并 · 查看明细 →</small></a>'
+        f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="syndicated", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看转载扩散链接"><span>转载扩散链接</span><strong>{stats.get("syndicated_mentions", 0)}</strong><small>社媒扩散 {stats.get("social_amplifications", 0)} 条</small><small class="metric-link__action">查看明细 →</small></a>'
+        f'<a class="metric metric-link metric--risk" href="/review/analysis/details{_q(token, metric="substantive", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看待复核的新增实质信号"><span>新增实质信号</span><strong>{stats.get("substantive_updates", 0)}</strong><small>待人工复核 · 紧急 {stats.get("urgent_mentions", 0)} · 传播突增 {stats.get("surge_mentions", 0)}</small><small class="metric-link__action">优先查看 →</small></a>'
+        f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="parent_posts", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看公开社媒母帖"><span>社媒母帖</span><strong>{stats.get("public_social_parent_posts", 0)}</strong><small>仅公开索引 · 人工查看评论</small><small class="metric-link__action">打开母帖 →</small></a>'
         f'<article class="metric"><span>待回应</span><strong>{stats.get("pending_responses", 0)}</strong><small>待判断或建议回应</small></article>'
         '</section>'
         '<section class="scope-note"><strong>阅读顺序：</strong>先看“传播链接”判断声量，再看“独立传播簇”判断是否只是转载，最后以“新增实质信号”决定是否升级处置。</section>'
@@ -692,7 +716,7 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         + '</ol></aside></section>'
         '<section class="distribution-grid"><article class="panel"><h2>情感结构</h2><p class="panel-description">负面比例用于识别压力，不代表事件真实性。</p>'
         + sentiment_rows
-        + '</article><article class="panel"><h2>议题归纳</h2><p class="panel-description">来自分析分类。</p>'
+        + '</article><article class="panel"><h2>议题归纳</h2><p class="panel-description">按明确法律动作、召回/监管、事故陈述等可解释规则归纳；点击可查看原文证据。</p>'
         + category_rows
         + '</article><article class="panel"><h2>来源结构</h2><p class="panel-description">用于识别单一来源集中度。</p>'
         + source_rows

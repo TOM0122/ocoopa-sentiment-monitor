@@ -9,6 +9,7 @@ from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 from .syndication import ROLE_LABELS, with_syndication_fields
+from .topics import TOPIC_LABELS, enrich_topic_fields, is_public_social_parent_post
 
 
 DETAIL_METRICS = {
@@ -32,6 +33,11 @@ DETAIL_METRICS = {
         "short_label": "新增实质信号",
         "description": "可能包含第一人称事故陈述、新监管或法律动作的信息簇；必须查看原文并完成人工核实。",
     },
+    "parent_posts": {
+        "label": "公开社媒母帖（人工查看评论）",
+        "short_label": "社媒母帖",
+        "description": "系统仅从公开索引发现母帖并保留原帖链接；不接入平台管理权限、不抓取评论。请人工打开原帖查看评论，再按需要在复核页登记处置。",
+    },
 }
 
 
@@ -46,7 +52,7 @@ def build_detail_view(
     page_size: int = 100,
 ) -> Dict[str, Any]:
     metric = normalize_detail_metric(metric)
-    data = [with_syndication_fields(dict(row)) for row in rows]
+    data = [enrich_topic_fields(with_syndication_fields(dict(row))) for row in rows]
     data.sort(key=_row_sort_key, reverse=True)
     clusters = _build_clusters(data)
     substantive_clusters = [cluster for cluster in clusters if cluster["has_substantive_update"]]
@@ -55,6 +61,7 @@ def build_detail_view(
         "clusters": len(clusters),
         "syndicated": sum(bool(row.get("is_syndicated")) for row in data),
         "substantive": len(substantive_clusters),
+        "parent_posts": sum(is_public_social_parent_post(row) for row in data),
     }
     if metric == "clusters":
         selected = clusters
@@ -64,6 +71,9 @@ def build_detail_view(
         item_kind = "cluster"
     elif metric == "syndicated":
         selected = [row for row in data if row.get("is_syndicated")]
+        item_kind = "mention"
+    elif metric == "parent_posts":
+        selected = [row for row in data if is_public_social_parent_post(row)]
         item_kind = "mention"
     else:
         selected = data
@@ -156,6 +166,12 @@ def render_analysis_details(
     if not view["items"]:
         content = '<section class="empty-state"><h2>当前筛选范围暂无记录</h2><p>这只表示系统在当前时间、平台和主题范围内未发现对应内容。</p></section>'
     pagination = _render_pagination(view, days, filters, token)
+    topic_options = "".join(
+        f'<option value="{escape(name, quote=True)}"'
+        f'{" selected" if filters.get("topic") == name else ""}'
+        f'>{escape(label)}</option>'
+        for name, label in TOPIC_LABELS.items()
+    )
     filter_form = (
         '<form class="detail-filters" method="get" action="/review/analysis/details">'
         f'<input type="hidden" name="metric" value="{escape(metric, quote=True)}">'
@@ -164,6 +180,9 @@ def render_analysis_details(
         '<label>监测主题<select name="campaign"><option value="">全部</option>'
         f'<option value="recall_26_659"{" selected" if filters.get("campaign") == "recall_26_659" else ""}>召回 26-659</option>'
         f'<option value="brand_major_risk"{" selected" if filters.get("campaign") == "brand_major_risk" else ""}>品牌重大风险</option></select></label>'
+        '<label>议题<select name="topic"><option value="">全部</option>'
+        + topic_options
+        + '</select></label>'
         '<button type="submit">应用筛选</button></form>'
     )
     scope_parts = [f"近 {days} 个北京时间自然日"]
@@ -173,6 +192,8 @@ def render_analysis_details(
         scope_parts.append(
             "主题：召回 26-659" if filters["campaign"] == "recall_26_659" else "主题：品牌重大风险"
         )
+    if filters.get("topic"):
+        scope_parts.append(f"议题：{TOPIC_LABELS.get(filters['topic'], filters['topic'])}")
     return (
         '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -182,7 +203,7 @@ def render_analysis_details(
         '.workspace-nav{display:flex;gap:6px;margin-bottom:24px;padding:5px;border:1px solid var(--line);border-radius:10px;background:var(--surface);width:max-content}.workspace-nav a,.logout-button{padding:8px 13px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-weight:700;text-decoration:none;cursor:pointer}.workspace-nav a[aria-current=page]{background:var(--accent);color:#fff}.logout-form{margin:0}'
         '.breadcrumbs{margin-bottom:12px;color:var(--muted);font-size:.86rem}.breadcrumbs a{text-underline-offset:3px}.header-row{display:flex;justify-content:space-between;align-items:flex-end;gap:18px;margin-bottom:18px}.eyebrow{margin:0 0 5px;color:var(--accent);font-size:.78rem;font-weight:800;letter-spacing:.07em}h1,h2,h3,p{margin-top:0}h1{margin-bottom:7px;font-size:clamp(1.7rem,4vw,2.25rem);letter-spacing:-.03em}.subtitle{margin:0;color:var(--muted)}'
         '.scope{padding:9px 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--muted);font-size:.82rem}.detail-filters{display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin:0 0 14px;padding:12px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}.detail-filters label{display:grid;gap:4px;color:var(--muted);font-size:.76rem;font-weight:700}.detail-filters input,.detail-filters select{min-width:180px;padding:8px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--ink)}.detail-filters button{min-height:36px;padding:8px 12px;border:0;border-radius:7px;background:var(--accent);color:#fff;font-weight:700}'
-        '.detail-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.detail-tab{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink);text-decoration:none;font-size:.86rem;font-weight:750}.detail-tab strong{font-size:1.05rem}.detail-tab--active{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}'
+        '.detail-tabs{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:14px}.detail-tab{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink);text-decoration:none;font-size:.86rem;font-weight:750}.detail-tab strong{font-size:1.05rem}.detail-tab--active{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}'
         '.definition{margin:0 0 14px;padding:13px 15px;border-left:4px solid var(--accent);border-radius:var(--radius);background:var(--accent-soft)}.definition strong{display:block;margin-bottom:3px}.definition p{margin:0;color:var(--muted);font-size:.87rem}.result-meta{display:flex;justify-content:space-between;gap:10px;align-items:center;margin:0 0 10px;color:var(--muted);font-size:.82rem}'
         '.cluster-card{margin-bottom:11px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:0 2px 8px rgba(15,35,60,.03);overflow:hidden}.cluster-card>summary{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;padding:16px;cursor:pointer;list-style:none}.cluster-card>summary::-webkit-details-marker{display:none}.cluster-card>summary:after{content:"展开证据";align-self:center;color:var(--accent);font-size:.78rem;font-weight:800}.cluster-card[open]>summary:after{content:"收起"}.cluster-title{margin:5px 0 4px;font-size:1rem}.cluster-description{margin:0;color:var(--muted);font-size:.84rem}.cluster-stats{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;align-content:flex-start}.tag{display:inline-flex;padding:3px 7px;border-radius:999px;background:#eef2f6;color:#4a5a70;font-size:.74rem;font-weight:750}.tag--red,.tag--substantive{background:var(--red-soft);color:var(--red)}.tag--yellow{background:var(--amber-soft);color:var(--amber)}.cluster-body{padding:0 16px 16px;border-top:1px solid var(--line)}.cluster-facts{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0;color:var(--muted);font-size:.79rem}'
         '.evidence-list{display:grid;gap:10px}.evidence-row{padding:14px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}.cluster-body .evidence-row{margin-top:10px;background:var(--canvas)}.evidence-meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;color:var(--muted);font-size:.76rem}.evidence-row h3{margin:8px 0 5px;font-size:.94rem}.evidence-row p{margin-bottom:9px;color:var(--muted);font-size:.84rem}.evidence-facts{display:flex;flex-wrap:wrap;gap:8px 14px;color:var(--muted);font-size:.76rem}.evidence-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:11px}.evidence-actions a{padding:6px 9px;border:1px solid var(--line);border-radius:7px;background:var(--surface);font-size:.79rem;font-weight:800;text-decoration:none}.evidence-actions a:first-child{border-color:var(--accent);background:var(--accent);color:#fff}'
@@ -193,12 +214,12 @@ def render_analysis_details(
         '<nav class="workspace-nav" aria-label="舆情工作台"><a href="/review'
         + _q(token)
         + '">事件复核</a><a href="/review/analysis'
-        + _q(token, days=days, platform=filters.get("platform"), campaign=filters.get("campaign"))
+        + _q(token, days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))
         + '" aria-current="page">分析看板</a><form class="logout-form" method="post" action="/auth/logout"><input type="hidden" name="csrf" value="'
         + escape(csrf_token, quote=True)
         + '"><button class="logout-button" type="submit">退出</button></form></nav>'
         '<div class="breadcrumbs"><a href="/review/analysis'
-        + _q(token, days=days, platform=filters.get("platform"), campaign=filters.get("campaign"))
+        + _q(token, days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))
         + '">分析看板</a> / 传播数据明细</div>'
         '<header class="header-row"><div><p class="eyebrow">OCOOPA / 证据追溯</p><h1>传播数据明细</h1><p class="subtitle">从汇总数字进入传播簇和原文证据。</p></div><div class="scope">'
         + escape(" · ".join(scope_parts))
@@ -274,6 +295,7 @@ def _render_detail_tab(
         days=days,
         platform=filters.get("platform"),
         campaign=filters.get("campaign"),
+        topic=filters.get("topic"),
     )
     return (
         f'<a class="detail-tab{(" detail-tab--active" if active else "")}" '
@@ -301,6 +323,10 @@ def _render_mention(
         f'<a href="{escape(source_url, quote=True)}" target="_blank" rel="noopener noreferrer">查看原文证据 ↗</a>'
         if source_url else '<span class="tag">原文链接不可用</span>'
     )
+    manual_comment_review = (
+        f'<a href="{escape(source_url, quote=True)}" target="_blank" rel="noopener noreferrer">人工查看评论 ↗</a>'
+        if is_public_social_parent_post(row) and source_url else ""
+    )
     metrics = " · ".join(
         f"{label} {int(row[key])}"
         for key, label in (("view_count", "浏览"), ("like_count", "点赞"), ("comment_count", "评论"), ("share_count", "分享"))
@@ -310,6 +336,7 @@ def _render_mention(
         f'<article class="evidence-row" id="detail-mention-{int(row.get("id") or 0)}"><div class="evidence-meta">'
         f'<span class="tag tag--{escape(risk, quote=True)}">{escape(_risk_label(risk))}</span>'
         f'<span class="tag">{escape(str(row.get("story_role_label") or "独立讨论"))}</span>'
+        f'<span class="tag">{escape(str(row.get("topic_primary_label") or "其他讨论"))}</span>'
         f'<span>{escape(row_platform.upper())}</span><span>{escape(str(row.get("source_name") or "未知来源"))}</span></div>'
         f'<h3>{escape(str(row.get("title") or "未命名内容"))}</h3>'
         f'<p>{escape(str(row.get("summary_zh") or row.get("text_excerpt") or "暂无摘要，请查看原文。"))}</p>'
@@ -321,6 +348,7 @@ def _render_mention(
         + (f'<span>{escape(metrics)}</span>' if metrics else '<span>平台未提供互动数据</span>')
         + '</div><div class="evidence-actions">'
         + original
+        + manual_comment_review
         + f'<a href="{escape(review_href, quote=True)}">进入复核页</a></div></article>'
     )
 
@@ -336,6 +364,7 @@ def _render_pagination(
         "days": days,
         "platform": filters.get("platform"),
         "campaign": filters.get("campaign"),
+        "topic": filters.get("topic"),
     }
     previous = (
         f'<a href="/review/analysis/details{_q(token, page=page - 1, **common)}">← 上一页</a>'
