@@ -13,7 +13,12 @@ from zoneinfo import ZoneInfo
 
 from .config import load_settings
 from .console_web import compute_dashboard, filter_rows, render_dashboard, render_search, rows_to_csv
-from .analysis_details import build_detail_view, normalize_detail_metric, render_analysis_details
+from .analysis_details import (
+    build_detail_view,
+    normalize_detail_metric,
+    normalize_story_role,
+    render_analysis_details,
+)
 from .db import create_database
 from .keywords import DEFAULT_KEYWORDS
 from .models import utcnow
@@ -33,6 +38,7 @@ from .session_auth import COOKIE_NAME, CSRF_COOKIE_NAME, issue_session, new_csrf
 from .source_health import SourceHealthMonitor
 from .sources import sources_for_settings
 from .topics import enrich_topic_fields
+from .syndication import with_syndication_fields
 from .interventions import intervention_status, requires_human_intervention
 from .operational import is_excluded_false_positive
 
@@ -371,10 +377,12 @@ if FastAPI is not None:
         platform: str = "",
         campaign: str = "",
         topic: str = "",
+        story_role: str = "",
         page: int = 1,
         authorization: str = Header(default=""),
     ) -> HTMLResponse:
         metric = normalize_detail_metric(metric)
+        story_role = normalize_story_role(story_role)
         days = min(max(days, 1), 366)
         page = max(page, 1)
         if token and settings.allow_query_token and token_ok(settings.review_token, token):
@@ -386,6 +394,7 @@ if FastAPI is not None:
                         "platform": platform,
                         "campaign": campaign,
                         "topic": topic,
+                        "story_role": story_role,
                         "page": page,
                     }.items() if value not in (None, "")
                 }
@@ -394,19 +403,28 @@ if FastAPI is not None:
         if not _page_authorized(request):
             return _unauthorized(HTMLResponse)
         start, end = _window(days)
-        rows = [
-            dict(row) for row in db.fetch_mentions_between(start, end)
-            if (not platform or row.get("platform") == platform)
-            and (not campaign or row.get("campaign") == campaign)
-            and (not topic or enrich_topic_fields(dict(row)).get("topic_primary") == topic)
-            and not is_excluded_false_positive(dict(row))
-        ]
+        rows = []
+        for raw_row in db.fetch_mentions_between(start, end):
+            row = with_syndication_fields(enrich_topic_fields(dict(raw_row)))
+            if (
+                (not platform or row.get("platform") == platform)
+                and (not campaign or row.get("campaign") == campaign)
+                and (not topic or row.get("topic_primary") == topic)
+                and (not story_role or row.get("story_role") == story_role)
+                and not is_excluded_false_positive(row)
+            ):
+                rows.append(row)
         view = build_detail_view(rows, metric=metric, page=page)
         return HTMLResponse(
             render_analysis_details(
                 view,
                 days,
-                filters={"platform": platform, "campaign": campaign, "topic": topic},
+                filters={
+                    "platform": platform,
+                    "campaign": campaign,
+                    "topic": topic,
+                    "story_role": story_role,
+                },
                 csrf_token=request.cookies.get(CSRF_COOKIE_NAME, ""),
             )
         )

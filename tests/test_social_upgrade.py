@@ -7,7 +7,12 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from ocoopa_monitor.analysis_web import compute_dashboard, render_dashboard
-from ocoopa_monitor.analysis_details import build_detail_view, normalize_detail_metric, render_analysis_details
+from ocoopa_monitor.analysis_details import (
+    build_detail_view,
+    normalize_detail_metric,
+    normalize_story_role,
+    render_analysis_details,
+)
 from ocoopa_monitor.config import Settings
 from ocoopa_monitor.console_web import rows_to_csv
 from ocoopa_monitor.db import Database
@@ -110,6 +115,9 @@ class SocialUpgradeTests(unittest.TestCase):
         self.assertIn("新增实质信号", html)
         self.assertNotIn("需人工介入", html)
         self.assertNotIn('intervention=human', html)
+        self.assertIn('story_role=news_repost', html)
+        self.assertNotIn("回应状态", html)
+        self.assertNotIn("高传播帖子榜", html)
         exported = rows_to_csv(rows)
         self.assertIn("story_cluster_key", exported.splitlines()[0])
         self.assertIn("story_cluster_label", exported.splitlines()[0])
@@ -137,11 +145,19 @@ class SocialUpgradeTests(unittest.TestCase):
         focused_detail = render_analysis_details(
             build_detail_view([{**rows[0], "id": 51}], metric="links"),
             7,
-            filters={"platform": "x", "campaign": "recall_26_659"},
+            filters={
+                "platform": "x",
+                "campaign": "recall_26_659",
+                "story_role": "official_source",
+            },
         )
         self.assertIn("view=library", focused_detail)
         self.assertIn("focus_mention_id=51", focused_detail)
         self.assertIn("return_to=", focused_detail)
+        self.assertIn('name="story_role"', focused_detail)
+        self.assertIn('value="official_source" selected', focused_detail)
+        self.assertEqual(normalize_story_role("news_repost"), "news_repost")
+        self.assertEqual(normalize_story_role("unknown-role"), "")
 
         stats["filters"] = {"platform": "x", "campaign": "recall_26_659"}
         filtered_dashboard = render_dashboard(stats, 7)
