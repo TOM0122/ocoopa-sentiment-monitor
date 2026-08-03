@@ -359,7 +359,8 @@ class Database:
                         content_hash=?, event_fingerprint=?, duplicate_group_id=?, is_new=0, is_updated=?,
                         backfill=backfill AND ?, fetched_at=?, platform=?, content_type=?,
                         provider=?, provider_item_id=?, parent_url=?, discovery_method=?,
-                        coverage_tier=?, provider_added_at=?, discovery_latency_seconds=?,
+                        coverage_tier=?, provider_added_at=?,
+                        discovery_latency_seconds=COALESCE(discovery_latency_seconds, ?),
                         view_count=?, like_count=?, comment_count=?, share_count=?, updated_at=?
                     WHERE id=?
                     """,
@@ -1188,10 +1189,10 @@ class Database:
                 )
                 LEFT JOIN mention_actions x ON x.mention_id=m.id
                 LEFT JOIN mention_notifications n ON n.mention_id=m.id
-                WHERE substr(m.fetched_at, 1, 10)=?
+                WHERE substr(m.first_seen_at, 1, 10)=?
                 ORDER BY
                     CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
-                    m.fetched_at DESC
+                    m.first_seen_at DESC
                 """,
                 (date_prefix,),
             ).fetchall()
@@ -1215,10 +1216,10 @@ class Database:
                 )
                 LEFT JOIN mention_actions x ON x.mention_id=m.id
                 LEFT JOIN mention_notifications n ON n.mention_id=m.id
-                WHERE m.fetched_at >= ? AND m.fetched_at < ?
+                WHERE m.first_seen_at >= ? AND m.first_seen_at < ?
                 ORDER BY
                     CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
-                    m.fetched_at DESC
+                    m.first_seen_at DESC
                 """,
                 (dt_to_str(start_at), dt_to_str(end_at)),
             ).fetchall()
@@ -1556,7 +1557,8 @@ class PostgresDatabase:
                         content_hash=%s, event_fingerprint=%s, duplicate_group_id=%s, is_new=FALSE, is_updated=%s,
                         backfill=backfill AND %s, fetched_at=%s, platform=%s, content_type=%s,
                         provider=%s, provider_item_id=%s, parent_url=%s, discovery_method=%s,
-                        coverage_tier=%s, provider_added_at=%s, discovery_latency_seconds=%s,
+                        coverage_tier=%s, provider_added_at=%s,
+                        discovery_latency_seconds=COALESCE(discovery_latency_seconds, %s),
                         view_count=%s, like_count=%s, comment_count=%s, share_count=%s, updated_at=%s
                     WHERE id=%s
                     """,
@@ -2334,10 +2336,10 @@ class PostgresDatabase:
                 )
                 LEFT JOIN mention_actions x ON x.mention_id=m.id
                 LEFT JOIN mention_notifications n ON n.mention_id=m.id
-                WHERE m.fetched_at >= %s AND m.fetched_at < %s
+                WHERE m.first_seen_at >= %s AND m.first_seen_at < %s
                 ORDER BY
                     CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
-                    m.fetched_at DESC
+                    m.first_seen_at DESC
                 """,
                 (start_at, end_at),
             ).fetchall()
@@ -2361,10 +2363,10 @@ class PostgresDatabase:
                 )
                 LEFT JOIN mention_actions x ON x.mention_id=m.id
                 LEFT JOIN mention_notifications n ON n.mention_id=m.id
-                WHERE m.fetched_at >= %s::date AND m.fetched_at < (%s::date + INTERVAL '1 day')
+                WHERE m.first_seen_at >= %s::date AND m.first_seen_at < (%s::date + INTERVAL '1 day')
                 ORDER BY
                     CASE a.risk_level WHEN 'red' THEN 1 WHEN 'yellow' THEN 2 ELSE 3 END,
-                    m.fetched_at DESC
+                    m.first_seen_at DESC
                 """,
                 (date_prefix, date_prefix),
             ).fetchall()
@@ -2566,6 +2568,7 @@ CREATE TABLE IF NOT EXISTS mentions (
 CREATE INDEX IF NOT EXISTS idx_mentions_event_fingerprint ON mentions(event_fingerprint);
 CREATE INDEX IF NOT EXISTS idx_mentions_backfill ON mentions(backfill);
 CREATE INDEX IF NOT EXISTS idx_mentions_fetched_at ON mentions(fetched_at);
+CREATE INDEX IF NOT EXISTS idx_mentions_first_seen_at ON mentions(first_seen_at);
 
 CREATE TABLE IF NOT EXISTS analysis_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -24,6 +24,10 @@ class DailyReportService:
             local_start.astimezone(timezone.utc),
             local_end.astimezone(timezone.utc),
         )
+        # The query is a first-discovery cohort. is_new is mutable operational
+        # state and becomes false when the same URL is polled again, so it
+        # cannot be used to reconstruct a historical daily-new count.
+        new_mentions = sum(1 for row in rows if not row["backfill"])
 
         sentiment = Counter(str(row["sentiment"] or "unknown") for row in rows)
         sources = Counter(str(row["source_name"]) for row in rows)
@@ -45,7 +49,7 @@ class DailyReportService:
         text = self._render(
             report_date=report_date,
             total=len(rows),
-            new_mentions=sum(1 for row in rows if row["is_new"]),
+            new_mentions=new_mentions,
             backfill_mentions=sum(1 for row in rows if row["backfill"]),
             sentiment=dict(sentiment),
             sources=dict(sources),
@@ -57,7 +61,7 @@ class DailyReportService:
             "report_date": report_date,
             "timezone": timezone_name,
             "total_mentions": len(rows),
-            "new_mentions": sum(1 for row in rows if row["is_new"]),
+            "new_mentions": new_mentions,
             "backfill_mentions": sum(1 for row in rows if row["backfill"]),
             "sentiment_distribution": dict(sentiment),
             "source_distribution": dict(sources),

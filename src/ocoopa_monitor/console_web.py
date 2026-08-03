@@ -21,6 +21,7 @@ CSV_COLUMNS = [
     "coverage_tier",
     "discovery_method",
     "published_at",
+    "first_seen_at",
     "fetched_at",
     "provider_added_at",
     "discovery_latency_seconds",
