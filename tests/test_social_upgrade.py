@@ -132,6 +132,15 @@ class SocialUpgradeTests(unittest.TestCase):
         self.assertNotIn("story:recall-26-659", detail_html)
         self.assertEqual(build_detail_view(rows, metric="links", page=2, page_size=20)["page"], 1)
 
+        focused_detail = render_analysis_details(
+            build_detail_view([{**rows[0], "id": 51}], metric="links"),
+            7,
+            filters={"platform": "x", "campaign": "recall_26_659"},
+        )
+        self.assertIn("view=library", focused_detail)
+        self.assertIn("focus_mention_id=51", focused_detail)
+        self.assertIn("return_to=", focused_detail)
+
         stats["filters"] = {"platform": "x", "campaign": "recall_26_659"}
         filtered_dashboard = render_dashboard(stats, 7)
         self.assertIn("/review/analysis/details?metric=links&amp;days=7&amp;platform=x&amp;campaign=recall_26_659", filtered_dashboard.replace("&", "&amp;"))
