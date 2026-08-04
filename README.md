@@ -7,8 +7,8 @@ Internal Ocoopa public-opinion and PR risk monitoring agent. **In production (Ra
 The core pipeline runs on the Python standard library; the web console/review UI needs the optional FastAPI extra.
 
 - keyword hot-load + `keyword` CLI for live edits (law-firm names, case numbers, models)
-- high-sensitivity (15 min), public-index social discovery (hourly), and optional licensed social (5 min) lanes
-- RSS, CPSC recall API, and generic-RSS (AboutLawsuits legal) fetchers; source-health monitoring + fetcher isolation
+- high-sensitivity (15 min), broad public-index social discovery (hourly), five known-media Facebook account checks (daily), and optional licensed social (5 min) lanes
+- RSS, CPSC recall API, generic-RSS (AboutLawsuits legal), and public-index fetchers; source-health monitoring records result/accepted/stored/filtered/duplicate counts per run
 - conservative URL/content/event dedupe + cross-source topic cooldown (one page per event)
 - rule-first analysis with a pluggable LLM provider (DeepSeek in prod), cross-lingual evidence grounding
 - deterministic cold-start: silent backfill before real-time alerts (no alert storm on first deploy)
@@ -16,7 +16,7 @@ The core pipeline runs on the Python standard library; the web console/review UI
 - dedicated CPSC 26-659 recall registry covering affected models, Reddit Atom, news/RSS, CPSC, legal feeds, and general-web search APIs
 - auditable group-history import and UTF-8 CSV statistics-table export
 - event review plus per-post response workflow (`待判断` / `建议回应` / `已回应` / `无需回应` / `升级 PR/法务`); no publishing endpoint exists
-- read-only operations console: daily trend line, keyword/topic synthesis, management summary, recommended actions, search, and CSV export
+- read-only operations console: daily trend line, keyword/topic synthesis, management summary, recommended actions, search, CSV export, source telemetry, and parent-post discovery attribution
 
 ## Quick Start
 
@@ -152,7 +152,6 @@ The model name, endpoint, and API key are all configurable. If DeepSeek is unava
 Commercial search/news APIs are optional but recommended for production recall:
 
 ```bash
-export OCOOPA_SERPAPI_API_KEY="..."
 export OCOOPA_BRAVE_SEARCH_API_KEY="..."
 export OCOOPA_GNEWS_API_KEY="..."
 ```
@@ -163,10 +162,20 @@ To stay inside free quotas, commercial APIs run on the **regular (hourly) lane**
 Ocoopa (fire OR death OR lawsuit OR recall OR CPSC OR "class action")
 ```
 
-Brave Search is the recommended public-index source. Its regular query is site
-limited to public TikTok, Instagram, Facebook, YouTube, X, Reddit, forum, and
-review pages. A zero result means only that the configured source did not
-discover a record; it does not prove the platform has no discussion.
+Brave Search is the recommended public-index source. One broad hourly query is
+site limited to public TikTok, Instagram, Facebook, YouTube, X, Reddit, forum,
+and review pages. Five additional daily queries separately target the public
+Facebook accounts of WHIO, WPRI, KENS, KARE, and Boston 25 after those outlets
+were observed syndicating the recall. This is public-index discovery only: the
+application does not log into Facebook or collect comments. A zero result means
+only that the configured source did not discover a record; it does not prove
+the platform or outlet has no discussion.
+
+The analysis dashboard exposes every source's latest `returned → accepted →
+new/updated stored → filtered → duplicate` counts. A health status of `ok`
+means the scheduled provider call completed; it is not evidence of complete
+platform coverage. Public-social source failures send a non-@ health notice so
+coverage loss is visible without treating zero results as an outage.
 
 ### Optional Brandwatch pilot
 
@@ -246,8 +255,8 @@ Before production cutover, a human operator must provide:
 - DingTalk robot signing secret.
 - Mobile numbers to @ for red alerts.
 - DeepSeek API key with access to the configured model.
-- Brave Search API key or SerpAPI API key.
-- GNews API key.
+- Brave Search API key for public-index and targeted-media discovery.
+- GNews API key for the optional second news source.
 - Deployment host or container runtime.
 
 Do not commit `.env`, API keys, webhook secrets, or production database files.
@@ -261,7 +270,9 @@ High-sensitivity lane (15 min, free / unmetered):
 - Reddit public Atom search for recall/fire/model propagation
 
 Regular lane (hourly):
-- Brave site-limited public-social discovery / GNews (when API keys are set)
+- Brave broad site-limited public-social discovery (when the Brave key is set)
+- Five independent Brave public-index checks for WHIO, WPRI, KENS, KARE, and Boston 25 Facebook accounts (one per account per day; first run is silent)
+- GNews (when its API key is set)
 - Google News RSS redundancy
 
 Licensed lane (5 minutes, disabled by default):
@@ -272,7 +283,8 @@ publicly accessible or licensed sources. Closed/private groups and social
 platforms that block unauthenticated indexing (for example private Facebook,
 Instagram, TikTok, or X content) cannot be claimed as complete without approved
 platform API access. General-web search APIs provide secondary discovery for
-publicly indexed pages on those platforms.
+publicly indexed pages on those platforms; a manually supplied public parent
+post can be silently preserved as evidence when search indexing misses it.
 
 `seed_sources` deactivates any source removed from `DEFAULT_SOURCES`, so the seed list is the single source of truth. The CPSC source follows the public recall API; confirm live ToS, parameters, and rate limits before relying on it.
 

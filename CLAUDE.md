@@ -18,11 +18,13 @@
 - 代码在 `src/ocoopa_monitor/`:`pipeline`(抓取→去重→分析→告警)、`analysis`/`llm`/`risk`/`evidence`、`fetchers/`、`db`、`reports`、`scheduler`、`delivery`/`outbox`、`recall`(召回专项台账)、`syndication`(传播角色/簇)、`topics`、`social`/`public_social_intake`、`interventions`、`operational`、web 渲染层(`review_web`/`console_web`/`analysis_web`/`analysis_details`)、`session_auth`、`api`、`cli`、`sources`、`keywords`、`config`、`normalize`。
 - **双数据库后端**:本地/测试 SQLite,生产 PostgreSQL,由 `create_database(settings)` 按 `OCOOPA_DB_URL`/`DATABASE_URL` 选择。`db.py` 里 `Database`(SQLite,`?` 占位)与 `PostgresDatabase`(`%s`、`RETURNING`)是**两套并行实现 —— 任何 db 方法改动必须两边同步改**。
 - **两个生产服务**(同一镜像/代码):scheduler(`railway.json` → `cli scheduler`)和 web(`railway.web.json` → `uvicorn ocoopa_monitor.api:app`),连同一个 Postgres。两者密钥不共用,`doctor --role scheduler|web` 分别自检。
-- **三条车道**:`high`(15min,只用免费源:Google News RSS + CPSC + AboutLawsuits + Reddit Atom)、`regular`(每小时,商业 API Brave/GNews + 公开社媒站点限定发现,守免费配额)、`licensed`(5min,Brandwatch;三项凭据齐全才启用,首次静默回溯 30 天)。
+- **三条车道**:`high`(15min,只用免费源:Google News RSS + CPSC + AboutLawsuits + Reddit Atom)、`regular`(每小时:Brave 广泛公开社媒索引、GNews、Google News RSS；另有 WHIO/WPRI/KENS/KARE/Boston 25 五个 Facebook 媒体账号各自每天一次的 Brave 定向索引，合计约 29 次 Brave 调用/日)、`licensed`(5min,Brandwatch;三项凭据齐全才启用,首次静默回溯 30 天)。当前不启用 Brandwatch。
+- **社媒发现边界与口径**:定向源仅查询公开索引,不登录 Facebook、不抓评论;每个新定向源首次成功采集必须静默入库。看板中的社媒母帖必须区分`广泛索引自动发现`、`媒体账号定向检索`和`人工补录兜底`;零记录只代表索引未返回,不得写成平台/账号没有讨论。
+- **源健康不是覆盖证明**:`source_health` 保留每轮 `返回/有效/新或更新入库/过滤/重复/查询对象`。`ok`只表示调用成功;公开社媒源连续失败必须进非 @ 健康提醒，缺少 Brave Key 不得伪装为“成功但无结果”。新增这些字段时仍须同步 SQLite、PostgreSQL 与看板。
 - **投递必须走 `delivery_outbox`**:先落库再发送,失败指数退避重试。别绕过 outbox 直接发网络请求。
 
 ## 改代码必知的坑
-- **给已有表加列**:必须同时在 SQLite `Database._migrate_sqlite` 和 Postgres `PostgresDatabase._PG_COLUMN_MIGRATIONS`(幂等 `ALTER ... ADD COLUMN IF NOT EXISTS`)加迁移。`CREATE TABLE IF NOT EXISTS` 不会改已存在的表——漏了生产会报 `column ... does not exist`(CI 用全新表查不出)。
+- **给已有表加列**:必须同时在 SQLite `Database._migrate_sqlite` 和 Postgres `PostgresDatabase._PG_COLUMN_MIGRATIONS`(幂等 `ALTER ... ADD COLUMN IF NOT EXISTS`)加迁移，并新增版本化 `migrations/*.sql`。`CREATE TABLE IF NOT EXISTS` 不会改已存在的表——漏了生产会报 `column ... does not exist`(CI 用全新表查不出)。Postgres 迁移执行器当前按分号切分语句，**SQL 注释中不得包含分号**。
 - **给 `Settings` 加字段**:除 `config.py` 外,需更新 `tests/` 里所有 `Settings(...)` 构造 —— 目前分布在 5 个测试文件(`test_core`、`test_third_round_optimizations`、`test_recall_hardening`、`test_social_upgrade`、`test_public_social_intake`),漏一个就整套报 `missing positional argument`。
 - **新增 web 逻辑**:放进 `review_web` / `console_web` / `analysis_web` / `analysis_details`(**这些模块一律不得 import fastapi**,才能单测);`api.py` 是唯一 import fastapi 的文件,只做路由薄封装(CI 不装 fastapi)。写操作要带 CSRF 与会话校验(见 `session_auth`)。
 - 冷启动顺序由 `system_state`(bootstrap 标志)保证:未 bootstrap 时 pipeline 抑制实时告警。别绕过。`bootstrap()` 跑三条车道,且**高敏车道所有 P0 源必须全部成功**,否则抛错不标记(防止带着瞎掉的源进入实时)。
