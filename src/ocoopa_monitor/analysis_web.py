@@ -345,6 +345,25 @@ def compute_dashboard(
         key=lambda item: (-item["platform_count"], item["title"]),
     )[:10]
     source_ranked = sorted(sources.items(), key=lambda item: (-item[1], item[0]))
+    parent_posts = [row for row in data if is_public_social_parent_post(row)]
+    targeted_parent_posts = sum(
+        str(row.get("source_name") or "").startswith("brave_media_outlet_social_")
+        for row in parent_posts
+    )
+    manual_parent_posts = sum(
+        str(row.get("source_name") or "") == "manual_public_social_intake"
+        for row in parent_posts
+    )
+    broad_parent_posts = sum(
+        str(row.get("source_name") or "") != "manual_public_social_intake"
+        and not str(row.get("source_name") or "").startswith("brave_media_outlet_social_")
+        for row in parent_posts
+    )
+    parent_source_breakdown = [
+        {"label": "广泛索引自动发现", "count": broad_parent_posts, "description": "公开搜索结果自动入库"},
+        {"label": "媒体账号定向检索", "count": targeted_parent_posts, "description": "按已知媒体账号独立巡检"},
+        {"label": "人工补录兜底", "count": manual_parent_posts, "description": "人工提供公开母帖链接"},
+    ]
     category_ranked = [
         (name, TOPIC_LABELS.get(name, name), count)
         for name, count in sorted(topics.items(), key=lambda item: (-item[1], item[0]))
@@ -356,7 +375,8 @@ def compute_dashboard(
         "total": total,
         "valid_mentions": total,
         "social_mentions": sum(str(row.get("platform") or "web") in social_platforms for row in data),
-        "public_social_parent_posts": sum(is_public_social_parent_post(row) for row in data),
+        "public_social_parent_posts": len(parent_posts),
+        "public_social_parent_sources": parent_source_breakdown,
         "urgent_mentions": sum(str(row.get("notification_priority") or "standard") == "urgent" for row in data),
         "pending_responses": sum(requires_human_intervention(row) for row in data),
         "manual_comment_reviews": intervention_statuses.get("人工查看评论", 0),
@@ -493,14 +513,26 @@ def _coverage_rows(rows: Sequence[Dict[str, Any]]) -> str:
 
 def _source_health_rows(rows: Sequence[Dict[str, Any]]) -> str:
     if not rows:
-        return '<tr><td colspan="6">暂无采集源健康数据</td></tr>'
+        return '<tr><td colspan="8">暂无采集源健康数据</td></tr>'
     return "".join(
         f'<tr><td>{escape(str(row.get("source_name") or "未知"))}</td>'
         f'<td>{escape(str(row.get("lane") or "未知"))}</td>'
         f'<td>{escape(str(row.get("health_status") or "unknown"))}</td>'
         f'<td>{escape(str(row.get("last_success_at") or "尚未成功"))}</td>'
         f'<td>{escape(str(row.get("last_attempt_at") or "尚未运行"))}</td>'
+        f'<td>返回 {int(row.get("last_result_count") or 0)} · 有效 {int(row.get("last_matched_count") or 0)} · '
+        f'新/更新 {int(row.get("last_stored_count") or 0)} · 过滤 {int(row.get("last_filtered_count") or 0)} · '
+        f'重复 {int(row.get("last_duplicate_count") or 0)}</td>'
+        f'<td>{escape(str(row.get("last_query_label") or "—"))}</td>'
         f'<td>{int(row.get("consecutive_failures") or 0)}</td></tr>'
+        for row in rows
+    )
+
+
+def _social_parent_source_rows(rows: Sequence[Dict[str, Any]]) -> str:
+    return "".join(
+        f'<div class="parent-source-row"><span>{escape(str(row["label"]))}</span>'
+        f'<strong>{int(row["count"])}</strong><small>{escape(str(row["description"]))}</small></div>'
         for row in rows
     )
 
@@ -581,6 +613,19 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
     days = int(stats.get("window_days") or window_days)
     filters = stats.get("filters") or {}
     trend_class = str(stats.get("trend", {}).get("direction") or "flat")
+    parent_source_counts = {
+        "broad": 0,
+        "targeted": 0,
+        "manual": 0,
+    }
+    for row in stats.get("public_social_parent_sources", []):
+        label = str(row.get("label") or "")
+        if label == "广泛索引自动发现":
+            parent_source_counts["broad"] = int(row.get("count") or 0)
+        elif label == "媒体账号定向检索":
+            parent_source_counts["targeted"] = int(row.get("count") or 0)
+        elif label == "人工补录兜底":
+            parent_source_counts["manual"] = int(row.get("count") or 0)
     date_links = "".join(
         f'<a href="/review/analysis{_q(token, days=value, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" '
         f'class="period-link{(" period-link--active" if value == days else "")}">{value} 天</a>'
@@ -674,13 +719,13 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         '.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}.panel h2{margin-bottom:4px;font-size:1.08rem}.panel-description{margin:0;color:var(--muted);font-size:.86rem}.legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:.78rem}.legend i{display:inline-block;width:15px;height:3px;margin-right:5px;vertical-align:middle}.legend-published{background:#6d4db3}.legend-total{background:#075985}.legend-red{background:#b42318}.legend-yellow{background:#d69e2e}'
         '.trend-chart{display:block;width:100%;height:auto;min-height:240px}.chart-grid{stroke:var(--line);stroke-width:1}.chart-label{fill:var(--muted);font-size:11px}.chart-line{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.chart-line--total{stroke:#075985}.chart-line--published{stroke:#6d4db3;stroke-dasharray:7 5}.chart-line--red{stroke:#b42318}.chart-line--yellow{stroke:#d69e2e}'
         '.analysis-list,.recommendation-list{margin:0;padding-left:1.25rem}.analysis-list li,.recommendation-list li{margin:.65rem 0}.recommendation-list li::marker{color:var(--accent);font-weight:800}.recommendation-head{margin-top:22px}.keyword-panel{margin-bottom:16px}'
-        '.distribution-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:16px}.distribution-row{display:grid;grid-template-columns:minmax(72px,1fr) 1.5fr 32px 44px;gap:8px;align-items:center;margin:10px 0;font-size:.82rem}.distribution-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.distribution-row strong{text-align:right}.distribution-row small{color:var(--muted);text-align:right}.distribution-row--link{color:inherit;text-decoration:none;border-radius:6px}.distribution-row--link:hover{background:var(--accent-soft)}.distribution-row--link:focus-visible{outline:3px solid #7dd3fc;outline-offset:2px}.distribution-bar{height:7px;border-radius:999px;background:#e9eef4;overflow:hidden}.distribution-bar i{display:block;height:100%;border-radius:inherit;background:var(--accent)}'
+        '.distribution-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-bottom:16px}.distribution-row{display:grid;grid-template-columns:minmax(72px,1fr) 1.5fr 32px 44px;gap:8px;align-items:center;margin:10px 0;font-size:.82rem}.distribution-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.distribution-row strong{text-align:right}.distribution-row small{color:var(--muted);text-align:right}.distribution-row--link{color:inherit;text-decoration:none;border-radius:6px}.distribution-row--link:hover{background:var(--accent-soft)}.distribution-row--link:focus-visible{outline:3px solid #7dd3fc;outline-offset:2px}.distribution-bar{height:7px;border-radius:999px;background:#e9eef4;overflow:hidden}.distribution-bar i{display:block;height:100%;border-radius:inherit;background:var(--accent)}.parent-source-row{display:grid;grid-template-columns:minmax(132px,1fr) 48px minmax(180px,2fr);gap:12px;align-items:center;margin:10px 0;font-size:.86rem}.parent-source-row strong{text-align:right}.parent-source-row small{color:var(--muted)}'
         '.keyword-wrap{display:flex;flex-wrap:wrap;gap:8px}.keyword-chip{padding:7px 9px;border:1px solid #bfd2df;border-radius:8px;background:var(--accent-soft);color:#19475f;font-size:.84rem}.keyword-chip b{margin-left:4px}.risk-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.risk-item{padding:14px;border:1px solid var(--line);border-left:4px solid var(--amber);border-radius:10px;background:var(--surface)}.risk-item--red{border-left-color:var(--red)}'
         '.risk-item__meta{display:flex;flex-wrap:wrap;gap:7px;align-items:center;color:var(--muted);font-size:.76rem}.risk-label,.mini-tag{padding:2px 6px;border-radius:999px;font-weight:800}.risk-label--red{color:#8a1c14;background:var(--red-soft)}.risk-label--yellow,.mini-tag{color:#775000;background:var(--amber-soft)}.risk-item h3{margin:9px 0 6px;font-size:.94rem}.risk-item p{margin-bottom:8px;color:var(--muted);font-size:.84rem}.risk-item footer a{color:var(--accent);font-size:.82rem;font-weight:800;text-underline-offset:3px}.risk-item footer span{color:var(--muted);font-size:.82rem}'
         '.daily-details{margin-top:12px}.daily-details summary{cursor:pointer;color:var(--accent);font-weight:800}.daily-table-wrap{overflow:auto;margin-top:12px}.daily-table{width:100%;border-collapse:collapse;font-size:.82rem}.daily-table th,.daily-table td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:right}.daily-table th:first-child,.daily-table td:first-child{text-align:left}.empty-inline{color:var(--muted)}'
         '.footer-note{margin-top:18px;color:var(--muted);font-size:.78rem}.secondary-link:focus-visible,.period-link:focus-visible,.workspace-nav a:focus-visible,.metric-link:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #7dd3fc;outline-offset:2px}'
         '@media(max-width:1100px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:900px){.header-row{align-items:flex-start;flex-direction:column}.header-actions{justify-content:flex-start}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.grid,.distribution-grid{grid-template-columns:1fr}.risk-grid{grid-template-columns:1fr}}'
-        '@media(max-width:560px){.page{padding:16px 12px 40px}.workspace-nav{width:100%}.workspace-nav a{flex:1;text-align:center}.metrics{grid-template-columns:1fr 1fr}.metric{padding:13px}.metric strong{font-size:1.45rem}.trend-note{display:block;padding:0;background:transparent;font-size:.73rem;line-height:1.35}.header-actions{gap:6px}.panel{padding:15px}.trend-chart{min-height:190px}.distribution-row{grid-template-columns:minmax(68px,1fr) 1fr 28px 42px}}'
+        '@media(max-width:560px){.page{padding:16px 12px 40px}.workspace-nav{width:100%}.workspace-nav a{flex:1;text-align:center}.metrics{grid-template-columns:1fr 1fr}.metric{padding:13px}.metric strong{font-size:1.45rem}.trend-note{display:block;padding:0;background:transparent;font-size:.73rem;line-height:1.35}.header-actions{gap:6px}.panel{padding:15px}.trend-chart{min-height:190px}.distribution-row{grid-template-columns:minmax(68px,1fr) 1fr 28px 42px}.parent-source-row{grid-template-columns:minmax(110px,1fr) 30px 1fr;gap:8px;font-size:.8rem}}'
         '@media(prefers-color-scheme:dark){:root{--canvas:#111a29;--surface:#172235;--ink:#eff6ff;--muted:#b1c0d3;--line:#34455e;--accent:#7dd3fc;--accent-soft:#12324a;--red:#ffb4ac;--red-soft:#482523;--amber:#ffd68a;--amber-soft:#423313;--shadow:0 12px 32px rgba(0,0,0,.2)}.workspace-nav a[aria-current="page"]{background:#7dd3fc;color:#082f49}.period-link--active{color:#bae6fd}.keyword-chip{border-color:#315d75;color:#cbefff}.scope-note{border-color:#315d75;color:#cbefff}.distribution-bar{background:#2a3950}.chart-line--total{stroke:#7dd3fc}.chart-line--red{stroke:#ffb4ac}.chart-line--yellow{stroke:#ffd68a}.legend-total{background:#7dd3fc}.legend-red{background:#ffb4ac}.legend-yellow{background:#ffd68a}.trend-note--down{color:#a4e2c0;background:#173a2b}}'
         '</style></head><body><main class="page">'
         '<nav class="workspace-nav" aria-label="舆情工作台"><a href="/review'
@@ -700,7 +745,7 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="clusters", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看自动归并的独立传播簇"><span>独立传播簇</span><strong>{stats.get("story_clusters", 0)}</strong><small class="trend-note trend-note--{trend_class}">{escape(str(stats.get("trend", {}).get("label") or "暂无趋势"))}</small><small class="metric-link__action">自动归并 · 查看明细 →</small></a>'
         f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="syndicated", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看转载扩散链接"><span>转载扩散链接</span><strong>{stats.get("syndicated_mentions", 0)}</strong><small>社媒扩散 {stats.get("social_amplifications", 0)} 条</small><small class="metric-link__action">查看明细 →</small></a>'
         f'<a class="metric metric-link metric--risk" href="/review/analysis/details{_q(token, metric="substantive", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看待复核的新增实质信号"><span>新增实质信号</span><strong>{stats.get("substantive_updates", 0)}</strong><small>待人工复核 · 紧急 {stats.get("urgent_mentions", 0)} · 传播突增 {stats.get("surge_mentions", 0)}</small><small class="metric-link__action">优先查看 →</small></a>'
-        f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="parent_posts", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看公开社媒母帖"><span>社媒母帖</span><strong>{stats.get("public_social_parent_posts", 0)}</strong><small>仅公开索引 · 人工查看评论</small><small class="metric-link__action">打开母帖 →</small></a>'
+        f'<a class="metric metric-link" href="/review/analysis/details{_q(token, metric="parent_posts", days=days, platform=filters.get("platform"), campaign=filters.get("campaign"), topic=filters.get("topic"))}" aria-label="查看公开社媒母帖"><span>社媒母帖</span><strong>{stats.get("public_social_parent_posts", 0)}</strong><small>自动索引 {parent_source_counts["broad"]} · 定向 {parent_source_counts["targeted"]} · 补录 {parent_source_counts["manual"]}</small><small class="metric-link__action">打开母帖 →</small></a>'
         '</section>'
         '<section class="scope-note"><strong>阅读顺序：</strong>先看“传播链接”判断声量，再看“独立传播簇”判断是否只是转载，最后以“新增实质信号”决定是否升级处置。</section>'
         '<section class="grid"><article class="panel"><div class="panel-head"><div><h2>每日新增与风险走线</h2><p class="panel-description">按系统首次发现时间统计；重复巡检不会重复计数，排除历史回溯，今日为截至当前的部分数据。</p></div>'
@@ -721,6 +766,9 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         + '</article><article class="panel"><h2>来源结构</h2><p class="panel-description">用于识别单一来源集中度。</p>'
         + source_rows
         + '</article></section>'
+        '<section class="panel"><div class="panel-head"><div><h2>社媒母帖发现归因</h2><p class="panel-description">区分系统实际自动发现、媒体账号定向检索和人工补录；零记录只表示当前索引未返回，不表示平台没有讨论。</p></div></div><div class="distribution-list">'
+        + _social_parent_source_rows(stats.get("public_social_parent_sources", []))
+        + '</div></section>'
         '<section class="distribution-grid"><article class="panel"><h2>平台分布</h2><p class="panel-description">按公开内容所在平台归类。</p>'
         + platform_rows
         + '</article><article class="panel"><h2>传播结构</h2><p class="panel-description">区分官方事实源、转载扩散和新增实质信号；点击可查看原文证据。</p>'
@@ -741,7 +789,7 @@ def render_dashboard(stats: Dict[str, Any], window_days: int, token: str = "", c
         '<section class="panel"><div class="panel-head"><div><h2>平台覆盖矩阵</h2><p class="panel-description">零记录仅表示当前来源未发现，不代表平台没有讨论；持牌源、公开索引与历史回溯必须分开解释。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>平台</th><th>提及</th><th>覆盖等级</th><th>最近发现</th><th>P95 发现延迟（秒）</th></tr></thead><tbody>'
         + _coverage_rows(stats.get("coverage", []))
         + '</tbody></table></div></section>'
-        '<section class="panel"><div class="panel-head"><div><h2>采集源健康</h2><p class="panel-description">直接反映调度器的最近成功与连续失败；与平台零记录分开判断。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>采集源</th><th>通道</th><th>状态</th><th>最近成功</th><th>最近尝试</th><th>连续失败</th></tr></thead><tbody>'
+        '<section class="panel"><div class="panel-head"><div><h2>采集源健康</h2><p class="panel-description">“状态正常”仅表示巡检成功；请同时查看上次返回、有效和入库数量判断实际发现能力。</p></div></div><div class="daily-table-wrap"><table class="daily-table"><thead><tr><th>采集源</th><th>通道</th><th>状态</th><th>最近成功</th><th>最近尝试</th><th>上次运行结果</th><th>查询对象</th><th>连续失败</th></tr></thead><tbody>'
         + _source_health_rows(stats.get("source_health", []))
         + '</tbody></table></div></section>'
         f'<p class="footer-note">口径：北京时间；传播链接保留每个公开网页/帖子；已人工标记为误报的 {stats.get("excluded_false_positives", 0)} 条保留在复核证据库，但不进入本页任何统计、趋势或日报。传播簇将召回原始新闻稿及其普通转载归并；新增实质信号是自动筛查结果，必须人工核实，不等同于事实或法律结论。新收录 {stats.get("new_mentions", 0)} 条，历史回溯 {stats.get("backfill_mentions", 0)} 条。</p>'

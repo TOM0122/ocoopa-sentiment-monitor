@@ -73,18 +73,28 @@ DEFAULT_SOURCES: List[SourceConfig] = [
         url="https://api.search.brave.com/res/v1/web/search",
         alert_threshold_minutes=360,
     ),
-    # A precise complementary query for the public Facebook accounts of news
-    # outlets that syndicate the recall.  It is throttled by the pipeline to
-    # once per four hours, keeping the combined Brave use at ~30 calls/day.
-    SourceConfig(
-        source_name="brave_media_outlet_social",
-        source_type="social",
-        priority="P1",
-        lane="regular",
-        method="brave_search",
-        url="https://api.search.brave.com/res/v1/web/search",
-        alert_threshold_minutes=360,
-    ),
+    # Five independent, daily public-index checks for the media accounts that
+    # have already syndicated this recall. Together with the hourly broad
+    # query, this stays within the 30-calls/day Brave budget while making a
+    # zero-result account visible instead of hiding it in one combined query.
+    *[
+        SourceConfig(
+            source_name=source_name,
+            source_type="social",
+            priority="P1",
+            lane="regular",
+            method="brave_search",
+            url="https://api.search.brave.com/res/v1/web/search",
+            alert_threshold_minutes=1560,
+        )
+        for source_name in (
+            "brave_media_outlet_social_whionews",
+            "brave_media_outlet_social_wpri12",
+            "brave_media_outlet_social_kens5",
+            "brave_media_outlet_social_kare11",
+            "brave_media_outlet_social_boston25news",
+        )
+    ],
     SourceConfig(
         source_name="gnews_regular_news",
         source_type="news",

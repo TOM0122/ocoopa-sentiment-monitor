@@ -25,14 +25,40 @@ REGULAR_SOCIAL_QUERY = (
     '(site:tiktok.com OR site:instagram.com OR site:facebook.com OR site:youtube.com '
     'OR site:x.com OR site:reddit.com OR site:trustpilot.com)'
 )
-# Targeted public-index query for the media accounts that have already
-# syndicated the recall on Facebook.  This is intentionally a separate source
-# from the broad query: it improves recall of deep /photos and /posts URLs
-# while preserving the broad multi-platform discovery lane.
-REGULAR_MEDIA_OUTLET_SOCIAL_QUERY = (
-    'site:facebook.com ("OCOOPA" OR "26-659" OR "hand warmer") '
-    '(WHIO OR WPRI OR KENS OR KARE OR "Boston 25")'
-)
+# The public parent posts supplied by operations identify a small, auditable
+# outlet roster. Each account receives its own daily query rather than
+# competing for the ten result slots of one combined query. A path-level site
+# restriction covers Facebook's /posts, /photos and /videos URL variants
+# without attempting to fetch Facebook itself.
+MEDIA_OUTLET_SOCIAL_TARGETS = {
+    "brave_media_outlet_social_whionews": ("WHIO News", "whionews"),
+    "brave_media_outlet_social_wpri12": ("WPRI 12", "WPRI12"),
+    "brave_media_outlet_social_kens5": ("KENS 5", "kens5"),
+    "brave_media_outlet_social_kare11": ("KARE 11", "KARE11"),
+    "brave_media_outlet_social_boston25news": ("Boston 25 News", "Boston25News"),
+}
+
+
+def is_media_outlet_social_source(source_name: str) -> bool:
+    return source_name in MEDIA_OUTLET_SOCIAL_TARGETS
+
+
+def media_outlet_target_label(source_name: str) -> str:
+    return MEDIA_OUTLET_SOCIAL_TARGETS[source_name][0]
+
+
+def media_outlet_query(source_name: str) -> str:
+    """Return the bounded public-index query for one known media account."""
+    _, account = MEDIA_OUTLET_SOCIAL_TARGETS[source_name]
+    return (
+        f'site:facebook.com/{account}/ ("OCOOPA" OR "26-659" OR "hand warmer") '
+        '(recall OR fire OR burn OR death)'
+    )
+
+
+# Compatibility export retained for integrations that import the former
+# constant. The scheduler now runs the source-specific query above.
+REGULAR_MEDIA_OUTLET_SOCIAL_QUERY = media_outlet_query("brave_media_outlet_social_whionews")
 REGULAR_NEWS_QUERY = (
     '("OCOOPA" OR "Shenzhen Street Cat Technology" OR "26-659" OR UT3053 OR UT3056 '
     'OR "ZLS-118" OR H01) '
@@ -171,7 +197,7 @@ class BraveSearchFetcher(Fetcher):
         since: Optional[datetime] = None,
     ) -> List[RawItem]:
         if not self.api_key:
-            return []
+            raise RuntimeError("Brave Search API key is not configured")
         query = _query_for_source(source)
         params = urlencode(
             {
@@ -204,7 +230,7 @@ class BraveSearchFetcher(Fetcher):
                 continue
             platform = infer_platform(link, source.source_type)
             content_type = infer_content_type(link, platform)
-            if source.source_name == "brave_media_outlet_social" and content_type == "comment":
+            if is_media_outlet_social_source(source.source_name) and content_type == "comment":
                 continue
             items.append(
                 RawItem(
@@ -224,7 +250,7 @@ class BraveSearchFetcher(Fetcher):
                     provider_item_id=link,
                     discovery_method=(
                         "public_index_media_targeted"
-                        if source.source_name == "brave_media_outlet_social" else "public_index"
+                        if is_media_outlet_social_source(source.source_name) else "public_index"
                     ),
                     coverage_tier="public_index",
                 )
@@ -235,8 +261,8 @@ class BraveSearchFetcher(Fetcher):
 def _query_for_source(source: SourceConfig) -> str:
     if source.lane == "high":
         return HIGH_SENSITIVITY_QUERY
-    if source.source_name in {"brave_media_outlet_social", "serpapi_media_outlet_social"}:
-        return REGULAR_MEDIA_OUTLET_SOCIAL_QUERY
+    if is_media_outlet_social_source(source.source_name):
+        return media_outlet_query(source.source_name)
     return REGULAR_SOCIAL_QUERY
 
 
