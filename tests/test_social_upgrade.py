@@ -163,6 +163,29 @@ class SocialUpgradeTests(unittest.TestCase):
         filtered_dashboard = render_dashboard(stats, 7)
         self.assertIn("/review/analysis/details?metric=links&amp;days=7&amp;platform=x&amp;campaign=recall_26_659", filtered_dashboard.replace("&", "&amp;"))
 
+    def test_dashboard_distinguishes_broad_targeted_and_manual_parent_posts(self):
+        when = datetime(2026, 8, 1, 2, tzinfo=timezone.utc)
+        base = {
+            "raw_text": "OCOOPA recall 26-659", "event_fingerprint": "recall",
+            "platform": "facebook", "content_type": "post", "fetched_at": when,
+            "first_seen_at": when, "risk_level": "red", "sentiment": "negative",
+            "campaign": "recall_26_659", "novelty_type": "known_recall_repost",
+        }
+        rows = [
+            {**base, "title": "Broad", "source_url": "https://facebook.com/a/posts/1", "source_name": "brave_regular_search"},
+            {**base, "title": "Targeted", "source_url": "https://facebook.com/b/posts/1", "source_name": "brave_media_outlet_social_wpri12"},
+            {**base, "title": "Manual", "source_url": "https://facebook.com/c/posts/1", "source_name": "manual_public_social_intake"},
+        ]
+        stats = compute_dashboard(rows, [], 7, now=datetime(2026, 8, 1, 8, tzinfo=timezone.utc))
+        self.assertEqual(stats["public_social_parent_posts"], 3)
+        self.assertEqual(
+            [item["count"] for item in stats["public_social_parent_sources"]], [1, 1, 1]
+        )
+        html = render_dashboard(stats, 7)
+        self.assertIn("社媒母帖发现归因", html)
+        self.assertIn("自动索引 1 · 定向 1 · 补录 1", html)
+        self.assertIn("上次运行结果", html)
+
     def test_false_positive_is_retained_for_audit_but_excluded_from_dashboard(self):
         when = datetime(2026, 8, 1, 2, tzinfo=timezone.utc)
         rows = [

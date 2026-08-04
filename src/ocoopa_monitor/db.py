@@ -61,6 +61,15 @@ class Database:
         self._add_column_if_missing(conn, "alerts", "delivery_latency_seconds", "INTEGER")
         self._add_column_if_missing(conn, "incident_groups", "muted_until", "TEXT")
         for column, column_type in (
+            ("last_result_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_matched_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_stored_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_filtered_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_duplicate_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_query_label", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            self._add_column_if_missing(conn, "source_health", column, column_type)
+        for column, column_type in (
             ("platform", "TEXT NOT NULL DEFAULT 'web'"),
             ("content_type", "TEXT NOT NULL DEFAULT 'article'"),
             ("provider", "TEXT NOT NULL DEFAULT ''"),
@@ -284,16 +293,31 @@ class Database:
                 (dt_to_str(utcnow()), source.id),
             )
 
-    def record_source_success(self, source: SourceConfig) -> None:
+    def record_source_success(
+        self, source: SourceConfig, telemetry: Optional[Dict[str, Any]] = None
+    ) -> None:
+        telemetry = telemetry or {}
         with self.connect() as conn:
             conn.execute(
                 """
                 UPDATE source_health
                 SET last_success_at=?, last_attempt_at=?, consecutive_failures=0,
-                    last_error=NULL, health_status='ok'
+                    last_error=NULL, health_status='ok',
+                    last_result_count=?, last_matched_count=?, last_stored_count=?,
+                    last_filtered_count=?, last_duplicate_count=?, last_query_label=?
                 WHERE source_id=?
                 """,
-                (dt_to_str(utcnow()), dt_to_str(utcnow()), source.id),
+                (
+                    dt_to_str(utcnow()),
+                    dt_to_str(utcnow()),
+                    int(telemetry.get("result_count") or 0),
+                    int(telemetry.get("matched_count") or 0),
+                    int(telemetry.get("stored_count") or 0),
+                    int(telemetry.get("filtered_count") or 0),
+                    int(telemetry.get("duplicate_count") or 0),
+                    str(telemetry.get("query_label") or ""),
+                    source.id,
+                ),
             )
 
     def record_source_failure(self, source: SourceConfig, error: str) -> None:
@@ -312,7 +336,7 @@ class Database:
         now = now or utcnow()
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT h.* FROM source_health h "
+                "SELECT h.*, c.source_type FROM source_health h "
                 "JOIN source_configs c ON c.id=h.source_id WHERE c.active=1"
             ).fetchall()
         unhealthy = []
@@ -330,7 +354,7 @@ class Database:
     def list_source_health(self) -> List[Dict[str, Any]]:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(
-                "SELECT h.* FROM source_health h "
+                "SELECT h.*, c.source_type FROM source_health h "
                 "JOIN source_configs c ON c.id=h.source_id "
                 "WHERE c.active=1 ORDER BY h.priority, h.source_name"
             ).fetchall()]
@@ -1335,6 +1359,12 @@ class PostgresDatabase:
     _PG_COLUMN_MIGRATIONS = (
         "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS delivery_latency_seconds INTEGER",
         "ALTER TABLE incident_groups ADD COLUMN IF NOT EXISTS muted_until TIMESTAMPTZ",
+        "ALTER TABLE source_health ADD COLUMN IF NOT EXISTS last_result_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE source_health ADD COLUMN IF NOT EXISTS last_matched_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE source_health ADD COLUMN IF NOT EXISTS last_stored_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE source_health ADD COLUMN IF NOT EXISTS last_filtered_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE source_health ADD COLUMN IF NOT EXISTS last_duplicate_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE source_health ADD COLUMN IF NOT EXISTS last_query_label TEXT NOT NULL DEFAULT ''",
     )
 
     def init(self) -> None:
@@ -1524,17 +1554,32 @@ class PostgresDatabase:
                 (utcnow(), source.id),
             )
 
-    def record_source_success(self, source: SourceConfig) -> None:
+    def record_source_success(
+        self, source: SourceConfig, telemetry: Optional[Dict[str, Any]] = None
+    ) -> None:
+        telemetry = telemetry or {}
         now = utcnow()
         with self.connect() as conn:
             conn.execute(
                 """
                 UPDATE source_health
                 SET last_success_at=%s, last_attempt_at=%s, consecutive_failures=0,
-                    last_error=NULL, health_status='ok'
+                    last_error=NULL, health_status='ok',
+                    last_result_count=%s, last_matched_count=%s, last_stored_count=%s,
+                    last_filtered_count=%s, last_duplicate_count=%s, last_query_label=%s
                 WHERE source_id=%s
                 """,
-                (now, now, source.id),
+                (
+                    now,
+                    now,
+                    int(telemetry.get("result_count") or 0),
+                    int(telemetry.get("matched_count") or 0),
+                    int(telemetry.get("stored_count") or 0),
+                    int(telemetry.get("filtered_count") or 0),
+                    int(telemetry.get("duplicate_count") or 0),
+                    str(telemetry.get("query_label") or ""),
+                    source.id,
+                ),
             )
 
     def record_source_failure(self, source: SourceConfig, error: str) -> None:
@@ -1553,7 +1598,7 @@ class PostgresDatabase:
         now = now or utcnow()
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT h.* FROM source_health h "
+                "SELECT h.*, c.source_type FROM source_health h "
                 "JOIN source_configs c ON c.id=h.source_id WHERE c.active=TRUE"
             ).fetchall()
         unhealthy = []
@@ -1571,7 +1616,7 @@ class PostgresDatabase:
     def list_source_health(self) -> List[Dict[str, Any]]:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(
-                "SELECT h.* FROM source_health h "
+                "SELECT h.*, c.source_type FROM source_health h "
                 "JOIN source_configs c ON c.id=h.source_id "
                 "WHERE c.active=TRUE ORDER BY h.priority, h.source_name"
             ).fetchall()]
@@ -2610,7 +2655,13 @@ CREATE TABLE IF NOT EXISTS source_health (
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     health_status TEXT NOT NULL DEFAULT 'unknown',
-    alert_threshold_minutes INTEGER NOT NULL DEFAULT 120
+    alert_threshold_minutes INTEGER NOT NULL DEFAULT 120,
+    last_result_count INTEGER NOT NULL DEFAULT 0,
+    last_matched_count INTEGER NOT NULL DEFAULT 0,
+    last_stored_count INTEGER NOT NULL DEFAULT 0,
+    last_filtered_count INTEGER NOT NULL DEFAULT 0,
+    last_duplicate_count INTEGER NOT NULL DEFAULT 0,
+    last_query_label TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS mentions (

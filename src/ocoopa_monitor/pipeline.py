@@ -17,6 +17,7 @@ from .fetchers import (
     GoogleNewsRSSFetcher,
     SerpAPIFetcher,
 )
+from .fetchers.search_api import is_media_outlet_social_source, media_outlet_target_label
 from .llm import RuleOnlyProvider, provider_from_settings
 from .models import Mention, RawItem, SourceConfig, utcnow
 from .outbox import DeliveryOutboxWorker
@@ -128,6 +129,14 @@ class MonitorPipeline:
             self.db.record_source_attempt(source)
             try:
                 fetcher = self._fetcher_for(source)
+                source_stats = {
+                    "result_count": 0,
+                    "matched_count": 0,
+                    "stored_count": 0,
+                    "filtered_count": 0,
+                    "duplicate_count": 0,
+                    "query_label": self._source_query_label(source),
+                }
                 source_since = since
                 if source.method == "brandwatch" and source_since is None:
                     cursor = self.db.get_state(f"source_cursor:{source.source_name}")
@@ -136,6 +145,7 @@ class MonitorPipeline:
                         if source_since:
                             source_since -= timedelta(minutes=5)
                 raw_items = fetcher.fetch(source, keyword_terms, since=source_since)
+                source_stats["result_count"] = len(raw_items)
                 stats["items_fetched"] += len(raw_items)
                 for raw_item in raw_items:
                     query_terms = list(keyword_terms)
@@ -144,9 +154,11 @@ class MonitorPipeline:
                     mention = self._build_mention(raw_item, query_terms, backfill=source_backfill)
                     if since and mention.published_at and mention.published_at < since:
                         stats["items_filtered_since"] += 1
+                        source_stats["filtered_count"] += 1
                         continue
                     if not mention.matched_keywords:
                         stats["items_filtered_no_keywords"] += 1
+                        source_stats["filtered_count"] += 1
                         continue
                     assessment = assess_public_mention(mention)
                     if (
@@ -154,8 +166,10 @@ class MonitorPipeline:
                         or (source.source_type == "search" and mention.platform not in {"web", "news"})
                     ) and not assessment.valid:
                         stats["items_filtered_irrelevant"] += 1
+                        source_stats["filtered_count"] += 1
                         continue
                     stats["items_matched"] += 1
+                    source_stats["matched_count"] += 1
                     stored = self.db.upsert_mention(mention)
                     previous_metrics = self.db.record_interaction_snapshot(stored)
                     surge_reason = (
@@ -194,7 +208,9 @@ class MonitorPipeline:
                             stats["surge_alerts_queued"] += 1
                     if not stored.is_new and not stored.is_updated:
                         stats["items_duplicate_skipped"] += 1
+                        source_stats["duplicate_count"] += 1
                         continue
+                    source_stats["stored_count"] += 1
                     analysis = enrich_analysis(stored, self.analysis_service.analyze(stored))
                     self.db.insert_analysis(analysis)
                     self.db.ensure_mention_action(stored.id, response_guidance(stored, analysis))
@@ -257,11 +273,14 @@ class MonitorPipeline:
                             stats["alerts_suppressed_cooldown"] += 1
                         elif self._create_alert(stored, analysis, incident_group_id):
                             stats["alerts_created"] += 1
-                self.db.record_source_success(source)
-                if source.source_name == "brave_media_outlet_social":
-                    self.db.set_state("source_last_run:brave_media_outlet_social", utcnow().isoformat())
+                self.db.record_source_success(source, source_stats)
+                if is_media_outlet_social_source(source.source_name):
+                    self.db.set_state(f"source_last_run:{source.source_name}", utcnow().isoformat())
                     if source_backfill:
-                        self.db.set_state("media_outlet_social_backfill_completed_at", utcnow().isoformat())
+                        self.db.set_state(
+                            f"media_outlet_social_backfill_completed_at:{source.source_name}",
+                            utcnow().isoformat(),
+                        )
                 if source.method == "brandwatch":
                     self.db.set_state(f"source_cursor:{source.source_name}", utcnow().isoformat())
             except Exception as exc:
@@ -349,23 +368,33 @@ class MonitorPipeline:
         return stored
 
     def _source_due(self, source: SourceConfig, backfill: bool) -> bool:
-        if backfill or source.source_name != "brave_media_outlet_social":
+        if backfill or not is_media_outlet_social_source(source.source_name):
             return True
-        raw = self.db.get_state("source_last_run:brave_media_outlet_social")
+        raw = self.db.get_state(f"source_last_run:{source.source_name}")
         if not raw:
             return True
         try:
             last_run = _aware(datetime.fromisoformat(raw.replace("Z", "+00:00")))
         except ValueError:
             return True
-        return last_run is None or utcnow() - last_run >= timedelta(hours=4)
+        return last_run is None or utcnow() - last_run >= timedelta(hours=24)
 
     def _source_requires_silent_backfill(self, source: SourceConfig) -> bool:
         """New public-index sources must never replay indexed history as live."""
         return (
-            source.source_name == "brave_media_outlet_social"
-            and not self.db.get_state("media_outlet_social_backfill_completed_at")
+            is_media_outlet_social_source(source.source_name)
+            and not self.db.get_state(
+                f"media_outlet_social_backfill_completed_at:{source.source_name}"
+            )
         )
+
+    @staticmethod
+    def _source_query_label(source: SourceConfig) -> str:
+        if is_media_outlet_social_source(source.source_name):
+            return f"Facebook 定向：{media_outlet_target_label(source.source_name)}"
+        if source.source_name == "brave_regular_search":
+            return "公开社媒广泛索引"
+        return source.source_name
 
     def bootstrap(self, since_days: int) -> Dict[str, Dict[str, int]]:
         """Cold-start: silently backfill both lanes, then enable real-time alerts.

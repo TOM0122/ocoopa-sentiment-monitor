@@ -171,13 +171,18 @@ class SimpleScheduler:
         unhealthy = {s["source_name"]: s for s in self.health.check()}
         # Drop recovered sources so a future failure re-alerts.
         self._alerted_unhealthy &= set(unhealthy)
-        # P0 failures page the owner. Licensed providers also notify because a
-        # silent outage directly invalidates social coverage, but do not @.
+        # P0 failures page the owner. Licensed and public-social providers also
+        # notify because a silent outage directly invalidates the stated social
+        # coverage, but do not @.
         candidates = [
             s
             for name, s in unhealthy.items()
             if name not in self._alerted_unhealthy
-            and (str(s.get("priority")) == "P0" or str(s.get("lane")) == "licensed")
+            and (
+                str(s.get("priority")) == "P0"
+                or str(s.get("lane")) == "licensed"
+                or str(s.get("source_type")) == "social"
+            )
         ]
         if not candidates:
             return
@@ -187,7 +192,7 @@ class SimpleScheduler:
         ):
             if not group:
                 continue
-            label = "P0" if not suppress_at else "持牌社媒"
+            label = "P0" if not suppress_at else "社媒"
             lines = [f"【源健康告警】以下 {label} 采集源失联/连续失败，可能正在漏报：", ""]
             for source in group:
                 lines.append(

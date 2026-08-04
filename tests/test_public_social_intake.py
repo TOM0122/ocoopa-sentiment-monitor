@@ -8,7 +8,11 @@ from unittest.mock import patch
 
 from ocoopa_monitor.config import Settings
 from ocoopa_monitor.db import Database
-from ocoopa_monitor.fetchers.search_api import BraveSearchFetcher, REGULAR_MEDIA_OUTLET_SOCIAL_QUERY
+from ocoopa_monitor.fetchers.search_api import (
+    BraveSearchFetcher,
+    MEDIA_OUTLET_SOCIAL_TARGETS,
+    media_outlet_query,
+)
 from ocoopa_monitor.keywords import DEFAULT_KEYWORDS
 from ocoopa_monitor.models import RawItem, SourceConfig, utcnow
 from ocoopa_monitor.pipeline import MonitorPipeline
@@ -90,7 +94,7 @@ class PublicSocialIntakeTests(unittest.TestCase):
     def test_targeted_media_query_is_auto_configured_and_skips_comments(self):
         settings = _settings("/tmp/irrelevant.db")
         names = {source.source_name for source in sources_for_settings(settings)}
-        self.assertIn("brave_media_outlet_social", names)
+        self.assertTrue(set(MEDIA_OUTLET_SOCIAL_TARGETS).issubset(names))
         captured = []
 
         class Response:
@@ -111,23 +115,24 @@ class PublicSocialIntakeTests(unittest.TestCase):
             return Response()
 
         source = SourceConfig(
-            "brave_media_outlet_social", "social", "P1", "regular", "brave_search", "https://api.search.brave.com/res/v1/web/search"
+            "brave_media_outlet_social_wpri12", "social", "P1", "regular", "brave_search", "https://api.search.brave.com/res/v1/web/search"
         )
         with patch("ocoopa_monitor.fetchers.search_api.urlopen", side_effect=fake_urlopen):
             items = BraveSearchFetcher(api_key="secret").fetch(source, [])
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].discovery_method, "public_index_media_targeted")
         self.assertIn("WPRI", captured[0])
-        self.assertLessEqual(len(REGULAR_MEDIA_OUTLET_SOCIAL_QUERY), 400)
-        self.assertLessEqual(len(REGULAR_MEDIA_OUTLET_SOCIAL_QUERY.split()), 50)
+        self.assertIn("facebook.com%2FWPRI12%2F", captured[0])
+        self.assertLessEqual(len(media_outlet_query(source.source_name)), 400)
+        self.assertLessEqual(len(media_outlet_query(source.source_name).split()), 50)
 
-    def test_targeted_source_waits_four_hours_between_automatic_runs(self):
+    def test_each_targeted_source_waits_one_day_between_automatic_runs(self):
         with tempfile.NamedTemporaryFile() as tmp:
             db = Database(tmp.name)
             db.init()
             db.seed_keywords(DEFAULT_KEYWORDS)
             source = SourceConfig(
-                "brave_media_outlet_social", "social", "P1", "regular", "static", "test://media"
+                "brave_media_outlet_social_wpri12", "social", "P1", "regular", "static", "test://media"
             )
             db.seed_sources([source])
             pipeline = MonitorPipeline(db, _settings(tmp.name), fetchers={"static": StaticFetcher([])})
@@ -137,6 +142,38 @@ class PublicSocialIntakeTests(unittest.TestCase):
             self.assertEqual(second["sources_attempted"], 0)
             self.assertEqual(second["sources_deferred"], 1)
 
+    def test_targeted_source_health_records_execution_and_discovery_counts(self):
+        with tempfile.NamedTemporaryFile() as tmp:
+            db = Database(tmp.name)
+            db.init()
+            db.seed_keywords(DEFAULT_KEYWORDS)
+            source = SourceConfig(
+                "brave_media_outlet_social_wpri12", "social", "P1", "regular", "static", "test://media"
+            )
+            db.seed_sources([source])
+            items = [
+                RawItem(
+                    source_type="social", source_name=source.source_name,
+                    source_url="https://www.facebook.com/WPRI12/posts/ocoopa-26-659",
+                    title="WPRI OCOOPA recall 26-659", raw_text="OCOOPA recall 26-659",
+                    platform="facebook", content_type="post", provider="test", provider_item_id="valid",
+                ),
+                RawItem(
+                    source_type="social", source_name=source.source_name,
+                    source_url="https://www.facebook.com/WPRI12/posts/unrelated",
+                    title="Unrelated local weather", raw_text="Forecast for tomorrow",
+                    platform="facebook", content_type="post", provider="test", provider_item_id="filtered",
+                ),
+            ]
+            MonitorPipeline(db, _settings(tmp.name), fetchers={"static": StaticFetcher(items)}).run_lane("regular")
+            health = db.list_source_health()[0]
+            self.assertEqual(health["last_result_count"], 2)
+            self.assertEqual(health["last_matched_count"], 1)
+            self.assertEqual(health["last_stored_count"], 1)
+            self.assertEqual(health["last_filtered_count"], 1)
+            self.assertEqual(health["last_duplicate_count"], 0)
+            self.assertEqual(health["last_query_label"], "Facebook 定向：WPRI 12")
+
     def test_first_targeted_source_run_is_silent_before_realtime_delivery(self):
         with tempfile.NamedTemporaryFile() as tmp:
             db = Database(tmp.name)
@@ -145,10 +182,10 @@ class PublicSocialIntakeTests(unittest.TestCase):
             db.mark_bootstrapped()
             db.set_state("public_social_backfill_completed_at", utcnow().isoformat())
             db.seed_sources([
-                SourceConfig("brave_media_outlet_social", "social", "P1", "regular", "static", "test://media")
+                SourceConfig("brave_media_outlet_social_wpri12", "social", "P1", "regular", "static", "test://media")
             ])
             item = RawItem(
-                source_type="social", source_name="brave_media_outlet_social",
+                source_type="social", source_name="brave_media_outlet_social_wpri12",
                 source_url="https://www.facebook.com/WPRI12/posts/recall-ocoopa-hand-warmers-26-659",
                 title="WPRI OCOOPA hand warmer recall 26-659", raw_text="OCOOPA hand warmer recall 26-659",
                 platform="facebook", content_type="post", provider="brave", provider_item_id="wpri-1",
@@ -160,7 +197,9 @@ class PublicSocialIntakeTests(unittest.TestCase):
             rows = db.fetch_mentions_between(utcnow() - timedelta(days=1), utcnow() + timedelta(days=1))
             self.assertEqual(result["mention_batches_queued"], 0)
             self.assertTrue(rows[0]["backfill"])
-            self.assertIsNotNone(db.get_state("media_outlet_social_backfill_completed_at"))
+            self.assertIsNotNone(
+                db.get_state("media_outlet_social_backfill_completed_at:brave_media_outlet_social_wpri12")
+            )
 
 
 if __name__ == "__main__":
